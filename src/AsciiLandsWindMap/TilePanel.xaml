@@ -1,0 +1,51 @@
+<UserControl x:Class="AsciiLandsWindMap.TilePanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:AsciiLandsWindMap"
+             Background="{DynamicResource PanelBrush}">
+  <Grid>
+    <StackPanel x:Name="HelpPanel" Margin="18">
+      <TextBlock Text="Wind map" FontSize="20" FontWeight="SemiBold"/>
+      <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Text="Click a hex to set the wind. The arrow in the middle points where the wind is going. A bigger arrow is a stronger wind."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Day and Night switch the breeze described on the sailing wiki: onto land from 10:00 to 19:00, out to sea from 23:00 to 09:00. The hours between those are marked Turning."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Live follows a clock you set from the time in the corner of the game. There is no public server clock to read. Leave the day length blank to hold the time, or enter how many real minutes a game day lasts and it will keep ticking."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Search finds a region by name. Tags such as deep water or stormy stay on the tile. Export shares your wind, notes, and tags as JSON. On import you can keep yours or take theirs when a tile differs."/>
+      <TextBlock x:Name="MapTimeText" Margin="0,16,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+    </StackPanel>
+
+    <DockPanel x:Name="EditorPanel" Visibility="Collapsed" Margin="0">
+      <StackPanel DockPanel.Dock="Top" Margin="16,14,16,8">
+        <TextBlock x:Name="NameText" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+        <TextBlock x:Name="MetaText" Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+        <TextBlock x:Name="EditorTimeText" Margin="0,8,0,0" TextWrapping="Wrap"/>
+      </StackPanel>
+      <StackPanel DockPanel.Dock="Bottom" Margin="16,8,16,14">
+        <TextBlock x:Name="ErrorText" Foreground="{DynamicResource DangerBrush}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <Button x:Name="SaveWindButton" Content="Save wind reading" Click="SaveWindClick" Background="{DynamicResource AccentBrush}" Foreground="White"/>
+        <Button x:Name="SaveMetaButton" Content="Save note and tags" Click="SaveMetaClick" Margin="2,6,2,0"/>
+      </StackPanel>
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="16,0,16,8">
+          <local:CompassControl x:Name="Compass" Height="220"/>
+          <TextBlock x:Name="StrengthText" Margin="0,8,0,0" FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <TextBlock x:Name="CompassCaption" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+          <Button Content="Calm" HorizontalAlignment="Left" Margin="0,8,0,0" Click="CalmClick"/>
+          <TextBlock Text="Game time of this reading" Margin="0,12,0,4"/>
+          <TextBox x:Name="TimeBox" TextChanged="TimeBoxChanged"/>
+          <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="A reading at the same minute replaces the old one."/>
+          <TextBlock Text="Note" Margin="0,12,0,4"/>
+          <TextBox x:Name="NoteBox" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto"/>
+          <TextBlock Text="Tags" Margin="0,12,0,4"/>
+          <WrapPanel x:Name="BuiltInWrap"/>
+          <DockPanel Margin="0,4,0,0" LastChildFill="True">
+            <Button DockPanel.Dock="Right" Content="Add" Click="AddTagClick" Margin="6,0,0,0"/>
+            <TextBox x:Name="CustomTagBox" KeyDown="CustomTagKeyDown"/>
+          </DockPanel>
+          <WrapPanel x:Name="CustomWrap" Margin="0,8,0,0"/>
+          <TextBlock Text="Readings on this tile" Margin="0,14,0,4" FontWeight="SemiBold"/>
+          <StackPanel x:Name="ReadingList"/>
+        </StackPanel>
+      </ScrollViewer>
+    </DockPanel>
+  </Grid>
+</UserControl>

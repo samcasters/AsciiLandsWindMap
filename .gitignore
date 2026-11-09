@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+*.sqlite
+*.sqlite-journal
+*.user
+.vs/
+TestResults/
