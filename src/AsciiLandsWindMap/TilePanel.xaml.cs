@@ -6,12 +6,14 @@ namespace AsciiLandsWindMap;
 
 public readonly record struct WindReadingRequest(string RegionId, int GameMinute, double DirectionDeg, int Strength);
 
-public readonly record struct TileMetaRequest(string RegionId, string Note, IReadOnlyList<string> Tags);
+public readonly record struct TileMetaRequest(string RegionId, string Note, string Caption, string Icon, IReadOnlyList<string> Tags);
 
 public partial class TilePanel
 {
     private readonly Dictionary<string, System.Windows.Controls.Primitives.ToggleButton> _builtIn = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, System.Windows.Controls.Primitives.ToggleButton> _icons = new(StringComparer.Ordinal);
     private readonly List<string> _custom = [];
+    private string _icon = "";
     private RegionRow? _region;
     private List<ObservationRow> _readings = [];
     private int _mapMinute = WindRules.DayViewMinute;
@@ -29,6 +31,18 @@ public partial class TilePanel
             };
             _builtIn[id] = toggle;
             BuiltInWrap.Children.Add(toggle);
+        }
+        foreach (var (id, label) in TileIcons.All)
+        {
+            var toggle = new System.Windows.Controls.Primitives.ToggleButton
+            {
+                Content = label,
+                Style = (Style)FindResource("Chip"),
+                Tag = id,
+            };
+            toggle.Click += IconClick;
+            _icons[id] = toggle;
+            IconWrap.Children.Add(toggle);
         }
         Compass.Changed += (_, _) => UpdateCompassCaption();
         ShowHelp();
@@ -56,6 +70,8 @@ public partial class TilePanel
         NameText.Text = region.Name;
         MetaText.Text = $"{BiomeNames.Pretty(region.Biome)} · {WorldNames.Slug(region.Id)}";
         NoteBox.Text = region.Note;
+        CaptionBox.Text = region.Caption;
+        SelectIcon(TileIcons.Canonical(region.Icon) ?? "");
         LoadTags(region.Tags);
         UpdateMapTime(viewMinute);
         TimeBox.Text = GameClock.Format(viewMinute);
@@ -210,7 +226,23 @@ public partial class TilePanel
         if (_region == null)
             return;
         ErrorText.Text = "";
-        MetaSaveRequested?.Invoke(this, new TileMetaRequest(_region.Id, NoteBox.Text, CollectTags()));
+        var caption = TileIcons.CleanCaption(CaptionBox.Text);
+        CaptionBox.Text = caption;
+        MetaSaveRequested?.Invoke(this, new TileMetaRequest(_region.Id, NoteBox.Text, caption, _icon, CollectTags()));
+    }
+
+    private void SelectIcon(string icon)
+    {
+        _icon = icon;
+        foreach (var pair in _icons)
+            pair.Value.IsChecked = pair.Key == icon;
+    }
+
+    private void IconClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle || toggle.Tag is not string id)
+            return;
+        SelectIcon(toggle.IsChecked == true ? id : "");
     }
 
     private void CalmClick(object sender, RoutedEventArgs e)

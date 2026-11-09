@@ -7,23 +7,65 @@ public sealed class WindDatabase : IDisposable
 {
     private readonly SqliteConnection _connection;
 
+    public bool CreatedNew { get; }
+
     public WindDatabase(string path)
     {
         var folder = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(folder))
             Directory.CreateDirectory(folder);
-        _connection = new SqliteConnection($"Data Source={path}");
+        CreatedNew = !File.Exists(path);
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+        _connection = new SqliteConnection(builder.ToString());
         _connection.Open();
         Migrate();
     }
 
     public static string DefaultDatabasePath()
     {
-        var folder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AsciiLandsWindMap");
+        var folder = FolderBesideTheApp();
         Directory.CreateDirectory(folder);
-        return Path.Combine(folder, "wind.sqlite");
+        var path = Path.Combine(folder, "wind.sqlite");
+        if (!File.Exists(path))
+            TryCopyLegacyDatabase(path);
+        return path;
+    }
+
+    private static string FolderBesideTheApp()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && dir != null; i++)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "AsciiLandsWindMap.sln")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+
+        return AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static void TryCopyLegacyDatabase(string path)
+    {
+        var legacy = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AsciiLandsWindMap",
+            "wind.sqlite");
+        if (!File.Exists(legacy) || string.Equals(Path.GetFullPath(legacy), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+            return;
+        try
+        {
+            File.Copy(legacy, path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     public void Dispose() => _connection.Dispose();
@@ -34,7 +76,7 @@ public sealed class WindDatabase : IDisposable
         var byId = new Dictionary<string, RegionRow>(StringComparer.Ordinal);
         using (var command = _connection.CreateCommand())
         {
-            command.CommandText = "SELECT id, q, r, name, biome, note FROM regions";
+            command.CommandText = "SELECT id, q, r, name, biome, note, caption, icon FROM regions";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -46,6 +88,8 @@ public sealed class WindDatabase : IDisposable
                     Name = reader.GetString(3),
                     Biome = reader.GetString(4),
                     Note = reader.GetString(5),
+                    Caption = reader.GetString(6),
+                    Icon = reader.GetString(7),
                 };
                 regions.Add(row);
                 byId[row.Id] = row;
@@ -83,7 +127,92 @@ public sealed class WindDatabase : IDisposable
             }
         }
 
-        return new MapData { Regions = regions, Observations = observations };
+        var syncWind = new Dictionary<string, ObservationRow>(StringComparer.Ordinal);
+        using (var command = _connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT region_id, realm, game_minute, direction_deg, strength, recorded_utc
+                FROM sync_wind
+                WHERE realm = $realm
+                """;
+            command.Parameters.AddWithValue("$realm", realm);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                syncWind[reader.GetString(0)] = new ObservationRow
+                {
+                    RegionId = reader.GetString(0),
+                    Realm = reader.GetString(1),
+                    GameMinute = reader.GetInt32(2),
+                    DirectionDeg = reader.GetDouble(3),
+                    Strength = reader.GetInt32(4),
+                    RecordedUtc = reader.GetString(5),
+                };
+            }
+        }
+
+        return new MapData { Regions = regions, Observations = observations, SyncWind = syncWind };
+    }
+
+    public void ReplaceSyncWind(string realm, int gameMinute, IReadOnlyDictionary<string, SeaWindArrow> arrows)
+    {
+        gameMinute = WindRules.NormalizeMinute(gameMinute);
+        var utc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+        using var transaction = _connection.BeginTransaction();
+        using (var delete = _connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM sync_wind WHERE realm = $realm";
+            delete.Parameters.AddWithValue("$realm", realm);
+            delete.ExecuteNonQuery();
+        }
+        using (var insert = _connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO sync_wind (region_id, realm, game_minute, direction_deg, strength, recorded_utc)
+                VALUES ($id, $realm, $minute, $dir, $strength, $utc)
+                """;
+            var id = insert.Parameters.Add("$id", SqliteType.Text);
+            var realmParam = insert.Parameters.Add("$realm", SqliteType.Text);
+            var minute = insert.Parameters.Add("$minute", SqliteType.Integer);
+            var dir = insert.Parameters.Add("$dir", SqliteType.Real);
+            var strength = insert.Parameters.Add("$strength", SqliteType.Integer);
+            var recorded = insert.Parameters.Add("$utc", SqliteType.Text);
+            foreach (var (regionId, arrow) in arrows)
+            {
+                id.Value = regionId;
+                realmParam.Value = realm;
+                minute.Value = gameMinute;
+                dir.Value = Math.Round(CompassText.Normalize(arrow.DirectionDeg), 1);
+                strength.Value = Math.Clamp(arrow.Strength, 1, 3);
+                recorded.Value = utc;
+                insert.ExecuteNonQuery();
+            }
+        }
+        transaction.Commit();
+    }
+
+    public void SaveSyncTile(string realm, string regionId, int gameMinute, double directionDeg, int strength)
+    {
+        gameMinute = WindRules.NormalizeMinute(gameMinute);
+        using var command = _connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO sync_wind (region_id, realm, game_minute, direction_deg, strength, recorded_utc)
+            VALUES ($id, $realm, $minute, $dir, $strength, $utc)
+            ON CONFLICT(region_id, realm) DO UPDATE SET
+                game_minute = excluded.game_minute,
+                direction_deg = excluded.direction_deg,
+                strength = excluded.strength,
+                recorded_utc = excluded.recorded_utc
+            """;
+        command.Parameters.AddWithValue("$id", regionId);
+        command.Parameters.AddWithValue("$realm", realm);
+        command.Parameters.AddWithValue("$minute", gameMinute);
+        command.Parameters.AddWithValue("$dir", Math.Round(CompassText.Normalize(directionDeg), 1));
+        command.Parameters.AddWithValue("$strength", Math.Clamp(strength, 1, 3));
+        command.Parameters.AddWithValue("$utc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+        command.ExecuteNonQuery();
     }
 
     public SyncResult ApplyWorld(IReadOnlyList<WorldNode> nodes, string? worldId)
@@ -167,18 +296,22 @@ public sealed class WindDatabase : IDisposable
         return new SyncResult(added, renamed, valid.Count, worldId);
     }
 
-    public void SaveTileMeta(string regionId, string note, IEnumerable<string> tags)
+    public void SaveTileMeta(string regionId, string note, IEnumerable<string> tags, string caption = "", string icon = "")
     {
         note = note.Trim();
         if (note.Length > 2000)
             note = note[..2000];
+        caption = TileIcons.CleanCaption(caption);
+        icon = TileIcons.Canonical(icon) ?? "";
         var canonical = TileTags.CanonicalSet(tags);
         using var transaction = _connection.BeginTransaction();
         using (var update = _connection.CreateCommand())
         {
             update.Transaction = transaction;
-            update.CommandText = "UPDATE regions SET note = $note WHERE id = $id";
+            update.CommandText = "UPDATE regions SET note = $note, caption = $caption, icon = $icon WHERE id = $id";
             update.Parameters.AddWithValue("$note", note);
+            update.Parameters.AddWithValue("$caption", caption);
+            update.Parameters.AddWithValue("$icon", icon);
             update.Parameters.AddWithValue("$id", regionId);
             update.ExecuteNonQuery();
         }
@@ -292,24 +425,40 @@ public sealed class WindDatabase : IDisposable
         {
             map.Observations.TryGetValue(region.Id, out var observations);
             observations ??= [];
-            if (region.Note.Trim().Length == 0 && region.Tags.Count == 0 && observations.Count == 0)
+            map.SyncWind.TryGetValue(region.Id, out var sync);
+            if (!HasContent(region.Note, region.Caption, region.Icon, region.Tags, observations.Select(item => item.ToLite()).ToList())
+                && sync == null)
                 continue;
+            var readings = observations
+                .OrderBy(item => item.GameMinute)
+                .ThenBy(item => item.Id)
+                .Select(item => new ReadingSnapshot
+                {
+                    GameMinute = item.GameMinute,
+                    DirectionDeg = item.DirectionDeg,
+                    Strength = item.Strength,
+                    RecordedUtc = item.RecordedUtc,
+                })
+                .ToList();
+            if (sync != null)
+            {
+                readings.Add(new ReadingSnapshot
+                {
+                    GameMinute = sync.GameMinute,
+                    DirectionDeg = sync.DirectionDeg,
+                    Strength = sync.Strength,
+                    RecordedUtc = sync.RecordedUtc,
+                    Source = "sync",
+                });
+            }
             tiles.Add(new TileSnapshot
             {
                 Id = region.Id,
                 Note = region.Note.Trim(),
+                Caption = TileIcons.CleanCaption(region.Caption),
+                Icon = TileIcons.Canonical(region.Icon) ?? "",
                 Tags = region.Tags.OrderBy(tag => tag, StringComparer.OrdinalIgnoreCase).ToList(),
-                Observations = observations
-                    .OrderBy(item => item.GameMinute)
-                    .ThenBy(item => item.Id)
-                    .Select(item => new ReadingSnapshot
-                    {
-                        GameMinute = item.GameMinute,
-                        DirectionDeg = item.DirectionDeg,
-                        Strength = item.Strength,
-                        RecordedUtc = item.RecordedUtc,
-                    })
-                    .ToList(),
+                Observations = readings,
             });
         }
         tiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
@@ -326,13 +475,13 @@ public sealed class WindDatabase : IDisposable
 
     public ImportAnalysis Analyze(MapSnapshot snapshot)
     {
-        var regions = new Dictionary<string, (string Name, string Note)>(StringComparer.Ordinal);
+        var regions = new Dictionary<string, (string Name, string Note, string Caption, string Icon)>(StringComparer.Ordinal);
         using (var command = _connection.CreateCommand())
         {
-            command.CommandText = "SELECT id, name, note FROM regions";
+            command.CommandText = "SELECT id, name, note, caption, icon FROM regions";
             using var reader = command.ExecuteReader();
             while (reader.Read())
-                regions[reader.GetString(0)] = (reader.GetString(1), reader.GetString(2));
+                regions[reader.GetString(0)] = (reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4));
         }
 
         var tags = new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -389,12 +538,14 @@ public sealed class WindDatabase : IDisposable
             observations.TryGetValue(tile.Id, out var localReadings);
             localReadings ??= [];
             var localNote = region.Note ?? "";
-            if (!HasContent(localNote, localTags, localReadings))
+            var localCaption = region.Caption ?? "";
+            var localIcon = region.Icon ?? "";
+            if (!HasContent(localNote, localCaption, localIcon, localTags, localReadings))
             {
                 adds.Add(theirs);
                 continue;
             }
-            if (SameTile(localNote, localTags, localReadings, theirs))
+            if (SameTile(localNote, localCaption, localIcon, localTags, localReadings, theirs))
             {
                 unchanged++;
                 continue;
@@ -403,8 +554,8 @@ public sealed class WindDatabase : IDisposable
             {
                 RegionId = tile.Id,
                 DisplayName = region.Name,
-                LocalSummary = TileText.Summary(localNote, TileTags.CanonicalSet(localTags), NormalizeReadings(localReadings)),
-                TheirSummary = TileText.Summary(theirs.Note, theirs.Tags, theirs.Observations.Select(ToLite).ToList()),
+                LocalSummary = TileText.Summary(localNote, localCaption, localIcon, TileTags.CanonicalSet(localTags), NormalizeReadings(localReadings)),
+                TheirSummary = TileText.Summary(theirs.Note, theirs.Caption, theirs.Icon, theirs.Tags, theirs.Observations.Select(ToLite).ToList()),
                 Theirs = theirs,
             });
         }
@@ -443,9 +594,64 @@ public sealed class WindDatabase : IDisposable
                 kept++;
             }
         }
+        WriteSyncImport(transaction, snapshot);
         transaction.Commit();
         return new ImportApplyResult(added, replaced, kept, analysis.Unchanged, analysis.UnknownIds.Count);
     }
+
+    private void WriteSyncImport(SqliteTransaction transaction, MapSnapshot snapshot)
+    {
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT id FROM regions";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                known.Add(reader.GetString(0));
+        }
+        using var delete = _connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM sync_wind WHERE region_id = $id AND realm = $realm";
+        var deleteId = delete.Parameters.Add("$id", SqliteType.Text);
+        var deleteRealm = delete.Parameters.Add("$realm", SqliteType.Text);
+        using var insert = _connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO sync_wind (region_id, realm, game_minute, direction_deg, strength, recorded_utc)
+            VALUES ($id, $realm, $minute, $dir, $strength, $utc)
+            """;
+        var id = insert.Parameters.Add("$id", SqliteType.Text);
+        var realm = insert.Parameters.Add("$realm", SqliteType.Text);
+        var minute = insert.Parameters.Add("$minute", SqliteType.Integer);
+        var dir = insert.Parameters.Add("$dir", SqliteType.Real);
+        var strength = insert.Parameters.Add("$strength", SqliteType.Integer);
+        var utc = insert.Parameters.Add("$utc", SqliteType.Text);
+        foreach (var tile in snapshot.Tiles ?? [])
+        {
+            if (!known.Contains(tile.Id))
+                continue;
+            var sync = (tile.Observations ?? []).Where(IsSync).ToList();
+            if (sync.Count == 0)
+                continue;
+            deleteId.Value = tile.Id;
+            deleteRealm.Value = snapshot.Realm;
+            delete.ExecuteNonQuery();
+            var reading = sync[^1];
+            id.Value = tile.Id;
+            realm.Value = snapshot.Realm;
+            minute.Value = WindRules.NormalizeMinute(reading.GameMinute);
+            dir.Value = Math.Round(CompassText.Normalize(reading.DirectionDeg), 1);
+            strength.Value = Math.Clamp(reading.Strength, 1, 3);
+            utc.Value = string.IsNullOrWhiteSpace(reading.RecordedUtc)
+                ? DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+                : reading.RecordedUtc;
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    private static bool IsSync(ReadingSnapshot reading) =>
+        string.Equals(reading.Source, "sync", StringComparison.OrdinalIgnoreCase);
 
     public string? GetSetting(string key)
     {
@@ -504,11 +710,15 @@ public sealed class WindDatabase : IDisposable
         var note = tile.Note?.Trim() ?? "";
         if (note.Length > 2000)
             note = note[..2000];
+        var caption = TileIcons.CleanCaption(tile.Caption);
+        var icon = TileIcons.Canonical(tile.Icon) ?? "";
         using (var update = _connection.CreateCommand())
         {
             update.Transaction = transaction;
-            update.CommandText = "UPDATE regions SET note = $note WHERE id = $id";
+            update.CommandText = "UPDATE regions SET note = $note, caption = $caption, icon = $icon WHERE id = $id";
             update.Parameters.AddWithValue("$note", note);
+            update.Parameters.AddWithValue("$caption", caption);
+            update.Parameters.AddWithValue("$icon", icon);
             update.Parameters.AddWithValue("$id", tile.Id);
             update.ExecuteNonQuery();
         }
@@ -570,11 +780,13 @@ public sealed class WindDatabase : IDisposable
 
     private static TileSnapshot NormalizeTile(TileSnapshot tile)
     {
-        var readings = NormalizeReadings((tile.Observations ?? []).Select(ToLite));
+        var readings = NormalizeReadings((tile.Observations ?? []).Where(reading => !IsSync(reading)).Select(ToLite));
         return new TileSnapshot
         {
             Id = tile.Id,
             Note = (tile.Note ?? "").Trim(),
+            Caption = TileIcons.CleanCaption(tile.Caption),
+            Icon = TileIcons.Canonical(tile.Icon) ?? "",
             Tags = TileTags.CanonicalSet(tile.Tags ?? []),
             Observations = readings.Select(reading => new ReadingSnapshot
             {
@@ -601,14 +813,22 @@ public sealed class WindDatabase : IDisposable
     }
 
     private static bool HasContent(TileSnapshot tile) =>
-        HasContent(tile.Note, tile.Tags, tile.Observations.Select(ToLite).ToList());
+        HasContent(tile.Note, tile.Caption, tile.Icon, tile.Tags, tile.Observations.Select(ToLite).ToList());
 
-    private static bool HasContent(string note, IReadOnlyCollection<string> tags, IReadOnlyCollection<ReadingLite> readings) =>
-        note.Trim().Length > 0 || tags.Count > 0 || readings.Count > 0;
+    private static bool HasContent(string note, string caption, string icon, IReadOnlyCollection<string> tags, IReadOnlyCollection<ReadingLite> readings) =>
+        note.Trim().Length > 0
+        || TileIcons.CleanCaption(caption).Length > 0
+        || TileIcons.Canonical(icon) != null
+        || tags.Count > 0
+        || readings.Count > 0;
 
-    private static bool SameTile(string note, IReadOnlyList<string> tags, IReadOnlyList<ReadingLite> readings, TileSnapshot theirs)
+    private static bool SameTile(string note, string caption, string icon, IReadOnlyList<string> tags, IReadOnlyList<ReadingLite> readings, TileSnapshot theirs)
     {
         if (!string.Equals(note.Trim(), theirs.Note.Trim(), StringComparison.Ordinal))
+            return false;
+        if (!string.Equals(TileIcons.CleanCaption(caption), TileIcons.CleanCaption(theirs.Caption), StringComparison.Ordinal))
+            return false;
+        if (!string.Equals(TileIcons.Canonical(icon) ?? "", TileIcons.Canonical(theirs.Icon) ?? "", StringComparison.Ordinal))
             return false;
         var localTags = TileTags.CanonicalSet(tags);
         if (localTags.Count != theirs.Tags.Count)
@@ -658,6 +878,8 @@ public sealed class WindDatabase : IDisposable
                 name TEXT NOT NULL,
                 biome TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT '',
+                caption TEXT NOT NULL DEFAULT '',
+                icon TEXT NOT NULL DEFAULT '',
                 updated_utc TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS region_tags (
@@ -679,7 +901,36 @@ public sealed class WindDatabase : IDisposable
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sync_wind (
+                region_id TEXT NOT NULL,
+                realm TEXT NOT NULL,
+                game_minute INTEGER NOT NULL,
+                direction_deg REAL NOT NULL,
+                strength INTEGER NOT NULL,
+                recorded_utc TEXT NOT NULL,
+                PRIMARY KEY (region_id, realm)
+            );
             """;
         command.ExecuteNonQuery();
+        EnsureColumn("caption", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("icon", "TEXT NOT NULL DEFAULT ''");
+    }
+
+    private void EnsureColumn(string column, string definition)
+    {
+        using (var info = _connection.CreateCommand())
+        {
+            info.CommandText = "PRAGMA table_info(regions)";
+            using var reader = info.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+        }
+
+        using var alter = _connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE regions ADD COLUMN {column} {definition}";
+        alter.ExecuteNonQuery();
     }
 }

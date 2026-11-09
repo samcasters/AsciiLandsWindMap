@@ -10,6 +10,8 @@ public sealed class RegionRow
     public required string Name { get; init; }
     public required string Biome { get; init; }
     public string Note { get; set; } = "";
+    public string Caption { get; set; } = "";
+    public string Icon { get; set; } = "";
     public List<string> Tags { get; set; } = [];
 }
 
@@ -32,6 +34,7 @@ public sealed class MapData
 {
     public required List<RegionRow> Regions { get; init; }
     public required Dictionary<string, List<ObservationRow>> Observations { get; init; }
+    public Dictionary<string, ObservationRow> SyncWind { get; init; } = new(StringComparer.Ordinal);
 }
 
 public readonly record struct SyncResult(int Added, int Renamed, int Total, string? WorldId);
@@ -65,6 +68,12 @@ public sealed class TileSnapshot
     [JsonPropertyName("note")]
     public string Note { get; set; } = "";
 
+    [JsonPropertyName("caption")]
+    public string Caption { get; set; } = "";
+
+    [JsonPropertyName("icon")]
+    public string Icon { get; set; } = "";
+
     [JsonPropertyName("tags")]
     public List<string> Tags { get; set; } = [];
 
@@ -85,6 +94,10 @@ public sealed class ReadingSnapshot
 
     [JsonPropertyName("recorded_utc")]
     public string RecordedUtc { get; set; } = "";
+
+    [JsonPropertyName("source")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Source { get; set; } = "";
 }
 
 public sealed class ImportConflict

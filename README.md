@@ -6,20 +6,21 @@ The colored hexes are the world from the [wiki map](https://wiki.asciilands.io/w
 
 ## Launch
 
-Double-click `publish\AsciiLandsWindMap.exe`. The first launch needs the internet so it can download region names. After that it opens the saved map if the wiki is offline, and checks for new or renamed regions whenever it can.
+Double-click `AsciiLandsWindMap.exe` in this folder. The first launch needs the internet so it can download region names. After that it opens the saved map if the wiki is offline, and checks for new or renamed regions whenever it can.
 
-Your wind is stored on this PC at `%LocalAppData%\AsciiLandsWindMap\wind.sqlite`.
+If `wind.sqlite` is missing, the app creates it in this same folder the first time it starts. That file holds your wind readings, notes, and tags.
 
 ## How to use it
 
 - Drag the map to pan, scroll to zoom. **Show all** fits the whole world. The map opens zoomed in so the arrows are readable.
 - **Day** shows the breeze the wiki calls onto land (10:00–19:00). **Night** shows the breeze out to sea (23:00–09:00). The hours between those are **Turning**.
-- **Live** follows a clock you set with **Match game clock**. Type the time from the corner of the game. There is no public server clock. Leave the day length blank to hold that time, or enter how many real minutes one game day lasts and the clock keeps ticking.
+- **Live** follows a clock you set with **Match game clock**. Type the time from the corner of the game. Leave the day length blank to hold that time, or enter how many real minutes one game day lasts and the clock keeps ticking.
+- **Sync**, on the row under the clock, reads an open `https://asciilands.io/play` page. The seconds box is how often it reads, from 1 second to 10 minutes. A ship marks your hex at sea, and a person marks it on land. Ocean arrows follow the game's wind formula from that clock and keep moving between reads. A wind reading you entered still wins for that time of day. Details are in `sync.md`.
 - Click a hex. Drag the compass marker. Direction is where the wind is going (the in-game compass shows the opposite, where it blows from). Distance from the center snaps to calm, `~`, `≈`, or `≋`.
 - Save a note and tags on the tile. Built-in tags: deep water, shallow, stormy, river or lake, gale edge, favorite. You can type your own.
 - Search by region name (Ctrl+F). The realm box is Europe, North America, or Asia Pacific. Wind for each realm is kept separate. Notes and tags belong to the land.
 
-The sailing wiki does not publish a formula for the wind on each tile. The app shows what you entered for the time of day you are looking at. It does not guess a direction.
+Hand readings are what you entered for the time of day on screen. Sync can also fill ocean tiles from the game client's wind formula. It does not invent a different formula, and it does not draw calculated wind on land.
 
 ## Share a map
 

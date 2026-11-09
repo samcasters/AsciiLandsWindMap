@@ -13,6 +13,7 @@
   <Grid>
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
@@ -42,7 +43,16 @@
       </WrapPanel>
     </Border>
 
-    <Grid Grid.Row="1">
+    <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1" Padding="12,4,8,6">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <ToggleButton x:Name="GameSyncButton" Content="Sync" Margin="0,0,8,0" Padding="12,4" Checked="GameSyncToggled" Unchecked="GameSyncToggled" ToolTip="Read the open Asciilands game and fill sea wind"/>
+        <TextBox x:Name="SyncSecondsBox" Width="64" Text="5" LostFocus="SyncSecondsChanged" KeyDown="SyncSecondsKey" ToolTip="How often Sync reads the game, from 1 second to 10 minutes"/>
+        <TextBlock Text="seconds" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{DynamicResource MutedBrush}"/>
+        <TextBlock x:Name="SyncStatus" VerticalAlignment="Center" Margin="16,0,0,0" TextWrapping="Wrap"/>
+      </StackPanel>
+    </Border>
+
+    <Grid Grid.Row="2">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="360"/>
@@ -57,20 +67,21 @@
             <TextBlock Margin="0,2,0,0" Text="~ light     ≈ fresh     ≋ strong"/>
             <TextBlock Foreground="{DynamicResource MutedBrush}" Text="The arrow points where the wind is going."/>
             <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Gold dot: favorite. Amber diamond: storm or gale."/>
+            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Coral outline: the hex you are in."/>
           </StackPanel>
         </Border>
       </Grid>
       <local:TilePanel x:Name="Tile" Grid.Column="1"/>
     </Grid>
 
-    <Border Grid.Row="2" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0" Padding="10,6">
+    <Border Grid.Row="3" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0" Padding="10,6">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <TextBlock x:Name="HoverText" Text="Drag to pan. Scroll to zoom. Click a hex." TextTrimming="CharacterEllipsis"/>
-        <TextBlock x:Name="StatusText" Grid.Column="1" Margin="16,0,0,0" Foreground="{DynamicResource MutedBrush}"/>
+        <TextBlock x:Name="StatusText" Grid.Column="1" Margin="16,0,0,0" TextWrapping="Wrap" MaxWidth="640"/>
       </Grid>
     </Border>
   </Grid>

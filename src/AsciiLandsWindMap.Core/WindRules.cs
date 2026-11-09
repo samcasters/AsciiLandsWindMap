@@ -205,9 +205,62 @@ public static class BiomeNames
         part.Length == 0 ? part : char.ToUpperInvariant(part[0]) + part[1..];
 }
 
+public static class TileIcons
+{
+    public const int CaptionLimit = 80;
+
+    public static readonly (string Id, string Label)[] All =
+    [
+        ("camp", "Camp"),
+        ("home", "Home"),
+        ("port", "Port"),
+        ("boat", "Boat"),
+        ("danger", "Danger"),
+        ("cache", "Cache"),
+        ("star", "Star"),
+        ("shop", "Shop"),
+    ];
+
+    public static string? Canonical(string? icon)
+    {
+        if (string.IsNullOrWhiteSpace(icon))
+            return null;
+        var trimmed = icon.Trim();
+        foreach (var built in All)
+        {
+            if (string.Equals(built.Id, trimmed, StringComparison.OrdinalIgnoreCase))
+                return built.Id;
+        }
+        return null;
+    }
+
+    public static string LabelOf(string? icon)
+    {
+        var canonical = Canonical(icon);
+        if (canonical == null)
+            return "";
+        foreach (var built in All)
+        {
+            if (built.Id == canonical)
+                return built.Label;
+        }
+        return "";
+    }
+
+    public static string CleanCaption(string? caption)
+    {
+        if (string.IsNullOrWhiteSpace(caption))
+            return "";
+        var text = caption.ReplaceLineEndings(" ").Trim();
+        if (text.Length > CaptionLimit)
+            text = text[..CaptionLimit].Trim();
+        return text;
+    }
+}
+
 public static class TileText
 {
-    public static string Summary(string note, IReadOnlyList<string> tags, IReadOnlyList<ReadingLite> readings)
+    public static string Summary(string note, string caption, string icon, IReadOnlyList<string> tags, IReadOnlyList<ReadingLite> readings)
     {
         var parts = new List<string>();
         if (readings.Count == 0)
@@ -222,6 +275,11 @@ public static class TileText
         }
         if (tags.Count > 0)
             parts.Add("tags: " + string.Join(", ", tags));
+        if (!string.IsNullOrWhiteSpace(caption))
+            parts.Add("description: " + caption.Trim());
+        var mark = TileIcons.LabelOf(icon);
+        if (mark.Length > 0)
+            parts.Add("mark: " + mark);
         if (!string.IsNullOrWhiteSpace(note))
             parts.Add("has a note");
         return string.Join(" · ", parts);
