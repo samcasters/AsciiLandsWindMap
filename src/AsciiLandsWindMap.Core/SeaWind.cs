@@ -77,6 +77,8 @@ public static class SeaWind
 
     public static int MinuteOf(double hour) => (int)Math.Floor(Mod(hour, 24.0) * 60.0) % 1440;
 
+    public static int HourIndex(double hour) => (int)Math.Floor(Mod(hour, 24.0));
+
     public static double Breeze(double hour)
     {
         hour = Mod(hour, 24.0);
@@ -92,10 +94,11 @@ public static class SeaWind
         double hour,
         string? playerZoneId = null,
         bool playerEdge = false,
-        string? forcedWeather = null)
+        string? forcedWeather = null,
+        IReadOnlySet<string>? watered = null)
     {
         var result = new Dictionary<string, SeaWindArrow>(StringComparer.Ordinal);
-        SeaField.Build(regions).Fill(result, worldMs, hour, playerZoneId, playerEdge, forcedWeather);
+        SeaField.Build(regions, watered).Fill(result, worldMs, hour, playerZoneId, playerEdge, forcedWeather);
         return result;
     }
 
@@ -109,7 +112,7 @@ public static class SeaWind
 
         private SeaField(Prepared[] places) => _places = places;
 
-        public static SeaField Build(IReadOnlyList<RegionRow> regions)
+        public static SeaField Build(IReadOnlyList<RegionRow> regions, IReadOnlySet<string>? watered = null)
         {
             var byCoord = new Dictionary<(int Q, int R), RegionRow>(regions.Count);
             foreach (var region in regions)
@@ -117,7 +120,9 @@ public static class SeaWind
             var places = new List<Prepared>();
             foreach (var region in regions)
             {
-                if (!region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase))
+                var ocean = region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase);
+                var water = watered != null && watered.Contains(region.Id);
+                if (!ocean && !water)
                     continue;
                 places.Add(Prepare(region, byCoord));
             }

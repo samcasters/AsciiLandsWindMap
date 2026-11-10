@@ -260,19 +260,9 @@ public static class TileIcons
 
 public static class TileText
 {
-    public static string Summary(string note, string caption, string icon, IReadOnlyList<string> tags, IReadOnlyList<ReadingLite> readings)
+    public static string Summary(string note, string caption, string icon, IReadOnlyList<string> tags)
     {
         var parts = new List<string>();
-        if (readings.Count == 0)
-            parts.Add("no wind readings");
-        else
-        {
-            var shown = readings.OrderBy(reading => reading.GameMinute).Take(6).Select(FormatReading);
-            var text = string.Join(", ", shown);
-            if (readings.Count > 6)
-                text += $", +{readings.Count - 6} more";
-            parts.Add(text);
-        }
         if (tags.Count > 0)
             parts.Add("tags: " + string.Join(", ", tags));
         if (!string.IsNullOrWhiteSpace(caption))
@@ -282,7 +272,7 @@ public static class TileText
             parts.Add("mark: " + mark);
         if (!string.IsNullOrWhiteSpace(note))
             parts.Add("has a note");
-        return string.Join(" · ", parts);
+        return parts.Count == 0 ? "empty tile" : string.Join(" · ", parts);
     }
 
     public static string FormatReading(ReadingLite reading)

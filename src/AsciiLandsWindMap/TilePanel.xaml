@@ -1,59 +1,73 @@
 <UserControl x:Class="AsciiLandsWindMap.TilePanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:AsciiLandsWindMap"
              Background="{DynamicResource PanelBrush}">
   <Grid>
     <StackPanel x:Name="HelpPanel" Margin="18">
       <TextBlock Text="Wind map" FontSize="20" FontWeight="SemiBold"/>
-      <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Text="Click a hex to set the wind. The arrow in the middle points where the wind is going. A bigger arrow is a stronger wind."/>
-      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="A description sits under the tile name. A map mark sits at the bottom of the hex, so you can pick out a camp, port, or other place."/>
-      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Day and Night switch the breeze described on the sailing wiki: onto land from 10:00 to 19:00, out to sea from 23:00 to 09:00. The hours between those are marked Turning."/>
-      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Live follows a clock you set from the time in the corner of the game. There is no public server clock to read. Leave the day length blank to hold the time, or enter how many real minutes a game day lasts and it will keep ticking."/>
-      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Search finds a region by name. Tags such as deep water or stormy stay on the tile. Export shares your wind, notes, descriptions, marks, and tags as JSON. On import you can keep yours or take theirs when a tile differs."/>
+      <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Text="Click a hex to read that tile. The arrow in the middle points where the wind is going. A bigger arrow is a stronger wind."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Day and Night switch the breeze: onto land from 10:00 to 19:00, out to sea from 23:00 to 09:00. The hours between those are Turning. Arrows change once each in-game hour."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Sync starts on and reads the open game every 5 seconds. Live follows that clock. Ocean arrows come from the game's own wind formula."/>
+      <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" Text="Edit changes the description, note, mark, and tags on a tile. Export shares those notes. It does not share the wind."/>
       <TextBlock x:Name="MapTimeText" Margin="0,16,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
     </StackPanel>
 
-    <DockPanel x:Name="EditorPanel" Visibility="Collapsed" Margin="0">
-      <StackPanel DockPanel.Dock="Top" Margin="16,14,16,8">
-        <TextBlock x:Name="NameText" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
-        <TextBlock x:Name="MetaText" Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
-        <TextBlock x:Name="EditorTimeText" Margin="0,8,0,0" TextWrapping="Wrap"/>
-      </StackPanel>
-      <StackPanel DockPanel.Dock="Bottom" Margin="16,8,16,14">
-        <TextBlock x:Name="ErrorText" Foreground="{DynamicResource DangerBrush}" TextWrapping="Wrap" Margin="0,0,0,6"/>
-        <Button x:Name="SaveWindButton" Content="Save wind reading" Click="SaveWindClick" Background="{DynamicResource AccentBrush}" Foreground="White"/>
-        <Button x:Name="SaveMetaButton" Click="SaveMetaClick" Margin="2,6,2,0">
-          <TextBlock Text="Save note, description, and mark" TextWrapping="Wrap" TextAlignment="Center"/>
-        </Button>
-      </StackPanel>
-      <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="16,0,16,8">
-          <local:CompassControl x:Name="Compass" Height="220"/>
-          <TextBlock x:Name="StrengthText" Margin="0,8,0,0" FontWeight="SemiBold" TextWrapping="Wrap"/>
-          <TextBlock x:Name="CompassCaption" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
-          <Button Content="Calm" HorizontalAlignment="Left" Margin="0,8,0,0" Click="CalmClick"/>
-          <TextBlock Text="Game time of this reading" Margin="0,12,0,4"/>
-          <TextBox x:Name="TimeBox" TextChanged="TimeBoxChanged"/>
-          <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="A reading at the same minute replaces the old one."/>
-          <TextBlock Text="Note" Margin="0,12,0,4"/>
-          <TextBox x:Name="NoteBox" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto"/>
-          <TextBlock Text="Description" Margin="0,12,0,4"/>
-          <TextBox x:Name="CaptionBox" MaxLength="80"/>
-          <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="Shown under the tile name, in the same faint white."/>
-          <TextBlock Text="Map mark" Margin="0,12,0,4"/>
-          <WrapPanel x:Name="IconWrap"/>
-          <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="Sits at the bottom of the hex. Click the chosen mark again to clear it."/>
-          <TextBlock Text="Tags" Margin="0,12,0,4"/>
-          <WrapPanel x:Name="BuiltInWrap"/>
-          <DockPanel Margin="0,4,0,0" LastChildFill="True">
-            <Button DockPanel.Dock="Right" Content="Add" Click="AddTagClick" Margin="6,0,0,0"/>
-            <TextBox x:Name="CustomTagBox" KeyDown="CustomTagKeyDown"/>
-          </DockPanel>
-          <WrapPanel x:Name="CustomWrap" Margin="0,8,0,0"/>
-          <TextBlock Text="Readings on this tile" Margin="0,14,0,4" FontWeight="SemiBold"/>
-          <StackPanel x:Name="ReadingList"/>
+    <DockPanel x:Name="DetailPanel" Visibility="Collapsed">
+      <Grid DockPanel.Dock="Top" Margin="16,12,12,8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Margin="0,0,8,0">
+          <TextBlock x:Name="NameText" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <TextBlock x:Name="MetaText" Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+          <TextBlock x:Name="EditorTimeText" Margin="0,8,0,0" TextWrapping="Wrap"/>
         </StackPanel>
+        <Button Grid.Column="1" Content="X" VerticalAlignment="Top" Padding="10,4" Click="CloseClick" ToolTip="Close"/>
+      </Grid>
+
+      <StackPanel x:Name="ReadBar" DockPanel.Dock="Bottom" Margin="16,8,16,14">
+        <Button Content="Edit" Click="EditClick" Background="{DynamicResource AccentBrush}" Foreground="{DynamicResource InkBrush}"/>
+      </StackPanel>
+      <StackPanel x:Name="EditBar" DockPanel.Dock="Bottom" Visibility="Collapsed" Margin="16,8,16,14">
+        <TextBlock x:Name="ErrorText" Foreground="{DynamicResource DangerBrush}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <Button Content="Save" Click="SaveMetaClick" Background="{DynamicResource AccentBrush}" Foreground="{DynamicResource InkBrush}"/>
+        <Button Content="Cancel" Click="CancelEditClick" Margin="2,6,2,0"/>
+      </StackPanel>
+
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid>
+          <StackPanel x:Name="ReadBody" Margin="16,0,16,8">
+            <TextBlock Text="Wind" FontWeight="SemiBold"/>
+            <TextBlock x:Name="WindText" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            <TextBlock Text="Description" Margin="0,14,0,4" FontWeight="SemiBold"/>
+            <TextBlock x:Name="CaptionRead" TextWrapping="Wrap"/>
+            <TextBlock Text="Note" Margin="0,14,0,4" FontWeight="SemiBold"/>
+            <TextBlock x:Name="NoteRead" TextWrapping="Wrap"/>
+            <TextBlock Text="Map mark" Margin="0,14,0,4" FontWeight="SemiBold"/>
+            <TextBlock x:Name="MarkRead" TextWrapping="Wrap"/>
+            <TextBlock Text="Tags" Margin="0,14,0,4" FontWeight="SemiBold"/>
+            <TextBlock x:Name="TagsRead" TextWrapping="Wrap"/>
+          </StackPanel>
+
+          <StackPanel x:Name="EditBody" Visibility="Collapsed" Margin="16,0,16,8">
+            <TextBlock Text="Description" Margin="0,0,0,4"/>
+            <TextBox x:Name="CaptionBox" MaxLength="80"/>
+            <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="Shown under the tile name."/>
+            <TextBlock Text="Note" Margin="0,12,0,4"/>
+            <TextBox x:Name="NoteBox" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto"/>
+            <TextBlock Text="Map mark" Margin="0,12,0,4"/>
+            <WrapPanel x:Name="IconWrap"/>
+            <TextBlock Margin="0,4,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Text="Sits at the bottom of the hex. Click the chosen mark again to clear it."/>
+            <TextBlock Text="Tags" Margin="0,12,0,4"/>
+            <WrapPanel x:Name="BuiltInWrap"/>
+            <DockPanel Margin="0,4,0,0" LastChildFill="True">
+              <Button DockPanel.Dock="Right" Content="Add" Click="AddTagClick" Margin="6,0,0,0"/>
+              <TextBox x:Name="CustomTagBox" KeyDown="CustomTagKeyDown"/>
+            </DockPanel>
+            <WrapPanel x:Name="CustomWrap" Margin="0,8,0,0"/>
+          </StackPanel>
+        </Grid>
       </ScrollViewer>
     </DockPanel>
   </Grid>

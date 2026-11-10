@@ -3,6 +3,8 @@ obj/
 publish/
 *.sqlite
 *.sqlite-journal
+notice-accepted
+notice-accepted-2
 *.user
 .vs/
 TestResults/

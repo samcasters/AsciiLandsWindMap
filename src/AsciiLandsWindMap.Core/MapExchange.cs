@@ -30,7 +30,7 @@ public static class MapExchange
             if (snapshot == null)
                 throw new MapFileException("That file is empty.");
             if (snapshot.Schema != 1)
-                throw new MapFileException("This file is from a different version of the wind map.");
+                throw new MapFileException("This file is from a different version of the tile notes.");
             if (!Realms.IsKnown(snapshot.Realm))
                 throw new MapFileException("This file does not say which realm it is for.");
             snapshot.Tiles ??= [];
@@ -42,7 +42,7 @@ public static class MapExchange
         }
         catch (JsonException)
         {
-            throw new MapFileException("That file is not a wind map JSON file.");
+            throw new MapFileException("That file is not a tile notes JSON file.");
         }
         catch (IOException ex)
         {

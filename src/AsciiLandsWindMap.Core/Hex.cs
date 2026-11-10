@@ -19,6 +19,49 @@ public static class Axial
             yield return (q + dq, r + dr);
     }
 
+    public static int Distance(int q1, int r1, int q2, int r2)
+    {
+        var dq = q1 - q2;
+        var dr = r1 - r2;
+        var ds = (-q1 - r1) - (-q2 - r2);
+        return (Math.Abs(dq) + Math.Abs(dr) + Math.Abs(ds)) / 2;
+    }
+
+    /// <summary>
+    /// Outward unit vector of a flat side, in the same screen space as <see cref="HexLayout"/> (y grows downward).
+    /// Side 0 is east, then northeast, northwest, west, southwest, southeast.
+    /// </summary>
+    public static (double X, double Y) SideVector(int side)
+    {
+        var index = ((side % 6) + 6) % 6;
+        var geo = index == 0 ? 0 : (6 - index) % 6;
+        var angle = Math.PI / 180.0 * (60 * geo);
+        return (Math.Cos(angle), Math.Sin(angle));
+    }
+
+    /// <summary>Compass degrees of travel across a side. 0 is north and degrees grow clockwise, matching sea wind.</summary>
+    public static double SideBearing(int side)
+    {
+        var (x, y) = SideVector(side);
+        var degrees = Math.Atan2(x, -y) * 180.0 / Math.PI;
+        var mod = degrees % 360.0;
+        return mod < 0 ? mod + 360.0 : mod;
+    }
+
+    public static int SideTo(int q, int r, int nq, int nr)
+    {
+        var dq = nq - q;
+        var dr = nr - r;
+        for (var side = 0; side < NeighborDeltas.Length; side++)
+        {
+            if (NeighborDeltas[side].Q == dq && NeighborDeltas[side].R == dr)
+                return side;
+        }
+        return -1;
+    }
+
+    public static int Opposite(int side) => (side + 3) % 6;
+
     public static (int Q, int R) Round(double q, double r)
     {
         var x = q;

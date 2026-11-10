@@ -8,7 +8,7 @@
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource BgBrush}"
         Foreground="{DynamicResource TextBrush}"
-        FontFamily="Segoe UI" FontSize="14"
+        FontFamily="Trebuchet MS" FontSize="14"
         PreviewKeyDown="WindowKeyDown">
   <Grid>
     <Grid.RowDefinitions>
@@ -33,22 +33,25 @@
         <Button x:Name="DayButton" Content="Day" Margin="10,2,2,2" Click="DayClick" ToolTip="Show the daytime breeze, onto land"/>
         <Button x:Name="NightButton" Content="Night" Margin="2" Click="NightClick" ToolTip="Show the nighttime breeze, out to sea"/>
         <Button x:Name="LiveButton" Content="Live" Margin="2,2,8,2" Click="LiveClick" ToolTip="Follow the clock you matched from the game"/>
-        <TextBlock x:Name="ClockText" VerticalAlignment="Center" Margin="6,0" MinWidth="260"/>
+        <StackPanel Margin="6,0" VerticalAlignment="Center">
+          <TextBlock x:Name="ClockText" MinWidth="260"/>
+          <Button x:Name="GpsButton" Content="GPS" Margin="0,4,0,0" Padding="12,2" HorizontalAlignment="Left" Click="GpsClick" ToolTip="Pick Boat or Walk, then click the destination hex"/>
+        </StackPanel>
         <Button Content="Match game clock" Margin="4,2" Click="MatchClockClick"/>
         <ComboBox x:Name="RealmBox" Width="150" Margin="4,2" VerticalAlignment="Center" SelectionChanged="RealmChanged"/>
         <Button Content="Show all" Margin="4,2" Click="FitClick" ToolTip="Fit every region on screen"/>
         <Button x:Name="SyncButton" Content="Sync map" Margin="4,2" Click="SyncClick"/>
         <Button Content="Export" Margin="4,2" Click="ExportClick"/>
         <Button Content="Import" Margin="4,2" Click="ImportClick"/>
+        <Button Content="Notice" Margin="4,2" Click="NoticeClick" ToolTip="Read the notice about what this app reads"/>
       </WrapPanel>
     </Border>
 
     <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1" Padding="12,4,8,6">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <ToggleButton x:Name="GameSyncButton" Content="Sync" Margin="0,0,8,0" Padding="12,4" Checked="GameSyncToggled" Unchecked="GameSyncToggled" ToolTip="Read the open Asciilands game and fill sea wind"/>
-        <TextBox x:Name="SyncSecondsBox" Width="64" Text="5" LostFocus="SyncSecondsChanged" KeyDown="SyncSecondsKey" ToolTip="How often Sync reads the game, from 1 second to 10 minutes"/>
-        <TextBlock Text="seconds" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{DynamicResource MutedBrush}"/>
-        <TextBlock x:Name="SyncStatus" VerticalAlignment="Center" Margin="16,0,0,0" TextWrapping="Wrap"/>
+        <ToggleButton x:Name="GameSyncButton" Content="Sync" Margin="0,0,8,0" Padding="12,4" Checked="GameSyncToggled" Unchecked="GameSyncToggled" ToolTip="Read the open Asciilands game every 5 seconds and fill sea wind"/>
+        <Button x:Name="UpdateMapButton" Content="Update map" Margin="0,0,8,0" Padding="12,4" Click="UpdateMapClick" ToolTip="Read visited tiles from the map you have open in the game"/>
+        <TextBlock x:Name="SyncStatus" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
       </StackPanel>
     </Border>
 
@@ -61,13 +64,14 @@
         <local:HexMapControl x:Name="Map" PreviewMouseLeftButtonDown="MapPreviewDown"/>
         <TextBlock x:Name="EmptyText" Text="Downloading the Asciilands map…" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" IsHitTestVisible="False"/>
         <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="12" Padding="12,8"
-                Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="8" IsHitTestVisible="False">
+                Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" IsHitTestVisible="False">
           <StackPanel>
             <TextBlock FontWeight="SemiBold" Text="Wind arrows"/>
             <TextBlock Margin="0,2,0,0" Text="~ light     ≈ fresh     ≋ strong"/>
             <TextBlock Foreground="{DynamicResource MutedBrush}" Text="The arrow points where the wind is going."/>
             <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Gold dot: favorite. Amber diamond: storm or gale."/>
             <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Coral outline: the hex you are in."/>
+            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="A chart on a hex is the game's own tile. The pale line is the GPS route."/>
           </StackPanel>
         </Border>
       </Grid>

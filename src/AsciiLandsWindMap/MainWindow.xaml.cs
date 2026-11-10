@@ -1,8 +1,11 @@
 using System.Globalization;
 using System.IO;
 using System.Net.Http;
+using System.Net.WebSockets;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
@@ -17,7 +20,6 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _gameTimer;
     private List<RegionRow> _regions = [];
     private Dictionary<string, RegionRow> _byId = new(StringComparer.Ordinal);
-    private Dictionary<string, List<ObservationRow>> _observations = new(StringComparer.Ordinal);
     private Dictionary<string, ObservationRow> _syncWind = new(StringComparer.Ordinal);
     private Dictionary<string, WindSample> _arrows = new(StringComparer.Ordinal);
     private PlayerMark? _player;
@@ -30,7 +32,6 @@ public partial class MainWindow : Window
     private bool _syncing;
     private int _syncVersion;
     private int _gameVersion;
-    private int _syncSeconds = 5;
     private bool _gameBusy;
     private ServerClock? _serverClock;
     private double? _formulaHour;
@@ -38,12 +39,25 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, SeaWindArrow> _seaScratch = new(StringComparer.Ordinal);
     private int _seaPicture = int.MinValue;
     private int _seaMinute = -1;
-    private DateTime _seaNotBefore = DateTime.MinValue;
-    private int _seaSavedMinute = -1;
-    private DateTime _seaSavedUtc = DateTime.MinValue;
+    private int _arrowHour = int.MinValue;
+    private WindWindow? _drawnWindow;
+    private bool _drawnNight;
+    private object? _drawnSync;
     private string? _trackedZone;
     private bool _trackedEdge;
     private string? _trackedWeather;
+    private string? _playerZone;
+    private readonly Dictionary<string, TileSurvey> _surveys = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ImageSource> _surveyPictures = new(StringComparer.Ordinal);
+    private TravelMode? _gpsMode;
+    private string? _gpsDestinationId;
+    private RoutePlan? _gpsPlan;
+    private bool _gpsPicking;
+    private bool _overlayBusy;
+    private bool _overlayOnPage;
+    private bool _closing;
+    private DateTime _overlayAt = DateTime.MinValue;
+    private MinimapFloat? _float;
 
     public MainWindow()
     {
@@ -54,8 +68,6 @@ public partial class MainWindow : Window
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(100) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("AsciiLandsWindMap/1.0");
         _debugHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
-        _syncSeconds = SyncPace.ParseOrClamp(_database.GetSetting("sync_seconds"), 5);
-        SyncSecondsBox.Text = _syncSeconds.ToString(CultureInfo.InvariantCulture);
         _realm = _database.GetSetting("realm") ?? "eu";
         if (!Realms.IsKnown(_realm))
             _realm = "eu";
@@ -63,29 +75,49 @@ public partial class MainWindow : Window
         _clock = _database.LoadClock();
         foreach (var realm in Realms.All)
             RealmBox.Items.Add(new RealmItem(realm.Id, realm.Label));
-        Map.RegionActivated += (_, region) => OpenRegion(region);
+        Map.RegionActivated += (_, region) => OnRegionClicked(region);
         Map.HoverChanged += (_, region) => HoverText.Text = region == null
             ? "Drag to pan. Scroll to zoom. Click a hex."
             : Describe(region);
-        Tile.WindSaveRequested += OnWindSave;
         Tile.MetaSaveRequested += OnMetaSave;
-        Tile.ReadingDeleteRequested += OnDeleteReading;
+        Tile.CloseRequested += (_, _) => Map.Select(null);
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _timer.Tick += (_, _) => TickClock();
         _timer.Start();
-        _gameTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(_syncSeconds) };
+        _gameTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _gameTimer.Tick += async (_, _) => await PollGameAsync();
         LoadFromDatabase();
         _ready = true;
         RealmBox.SelectedItem = RealmBox.Items.Cast<RealmItem>().First(item => item.Id == _realm);
         ApplyMode(MapMode.Day);
-        Loaded += async (_, _) => await SyncAsync();
+        Loaded += async (_, _) =>
+        {
+            GameSyncButton.IsChecked = true;
+            await SyncAsync();
+        };
         Closed += (_, _) =>
         {
+            _closing = true;
             _syncVersion++;
             _gameVersion++;
             _timer.Stop();
             _gameTimer.Stop();
+            if (_float != null)
+            {
+                _float.Close();
+                _float = null;
+            }
+            if (_overlayOnPage)
+            {
+                try
+                {
+                    using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    GameBrowser.RemoveOverlayAsync(_debugHttp, cancel.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException)
+                {
+                }
+            }
             _http.Dispose();
             _debugHttp.Dispose();
             _database.Dispose();
@@ -98,16 +130,19 @@ public partial class MainWindow : Window
         var map = _database.LoadMap(_realm);
         _regions = map.Regions;
         _byId = _regions.ToDictionary(region => region.Id, StringComparer.Ordinal);
-        _observations = map.Observations;
         _syncWind = map.SyncWind;
-        _seaField = _regions.Count == 0 ? null : SeaWind.SeaField.Build(_regions);
+        _seaField = null;
         _seaPicture = int.MinValue;
         _seaMinute = -1;
+        _arrowHour = int.MinValue;
         Map.SetContent(_regions, new Dictionary<string, WindSample>(StringComparer.Ordinal), IsNight());
+        LoadSurveys();
         RefreshArrows();
+        if (_regions.Count > 0)
+            EnsureSeaForView(force: true);
         EmptyText.Visibility = _regions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         if (selected != null && _byId.TryGetValue(selected, out var region))
-            Tile.ShowRegion(region, ReadingsFor(selected), _viewMinute, ArrowFor(selected));
+            Tile.ShowRegion(region, _viewMinute, ArrowFor(selected));
     }
 
     private void RefreshArrows()
@@ -115,29 +150,33 @@ public partial class MainWindow : Window
         if (_mode == MapMode.Live && LiveMinute() is null)
         {
             _arrows = new Dictionary<string, WindSample>(StringComparer.Ordinal);
+            _drawnWindow = null;
+            _drawnSync = null;
             Map.SetFrame(_arrows, false, _player);
             return;
         }
 
         var window = WindRules.WindowOf(_viewMinute);
-        _arrows = new Dictionary<string, WindSample>(StringComparer.Ordinal);
-        foreach (var (id, list) in _observations)
+        var night = IsNight();
+        if (_drawnWindow == window && _drawnNight == night && ReferenceEquals(_drawnSync, _syncWind))
         {
-            var inWindow = list
-                .Where(item => WindRules.WindowOf(item.GameMinute) == window)
-                .Select(item => item.ToLite())
-                .ToList();
-            var sample = WindRules.Average(inWindow);
-            if (sample != null)
-                _arrows[id] = sample.Value;
+            Map.SetPlayer(_player);
+            Tile.UpdateShown(_viewMinute, Tile.RegionId is string shown ? ArrowFor(shown) : null);
+            return;
         }
+
+        _drawnWindow = window;
+        _drawnNight = night;
+        _drawnSync = _syncWind;
+        _arrows = new Dictionary<string, WindSample>(StringComparer.Ordinal);
         foreach (var (id, sync) in _syncWind)
         {
-            if (_arrows.ContainsKey(id) || WindRules.WindowOf(sync.GameMinute) != window)
+            if (WindRules.WindowOf(sync.GameMinute) != window)
                 continue;
             _arrows[id] = new WindSample(sync.DirectionDeg, sync.Strength, 1, false);
         }
-        Map.SetFrame(_arrows, IsNight(), _player);
+        Map.SetFrame(_arrows, night, _player);
+        Tile.UpdateShown(_viewMinute, Tile.RegionId is string shownId ? ArrowFor(shownId) : null);
     }
 
     private void ApplyMode(MapMode mode)
@@ -155,12 +194,11 @@ public partial class MainWindow : Window
         App.ApplyTheme(IsNight());
         RefreshArrows();
         Tile.UpdateMapTime(_viewMinute);
-        if (mode != MapMode.Live)
-            Tile.SetSuggestedTime(_viewMinute);
     }
 
     private void TickClock()
     {
+        MaybeOverlay();
         if (_mode != MapMode.Live)
             return;
         if (GameSyncButton.IsChecked == true && _serverClock is ServerClock clock)
@@ -211,27 +249,73 @@ public partial class MainWindow : Window
             Tile.UpdateMapTime(_viewMinute);
         }
 
-        if (DateTime.UtcNow < _seaNotBefore && !minuteChanged)
+        if (SeaWind.HourIndex(hour) == _arrowHour)
             return;
-        _seaNotBefore = DateTime.UtcNow.AddSeconds(2);
         var elapsed = Math.Max(0, (DateTime.UtcNow - clock.ReadUtc).TotalMilliseconds);
-        _seaScratch.Clear();
-        Field().Fill(_seaScratch, clock.ServerTimeMs + elapsed, hour, _trackedZone, _trackedEdge, _trackedWeather);
-        ApplySea(_seaScratch, minute, minuteChanged, refresh: true);
+        PublishSea(clock.ServerTimeMs + elapsed, hour, minute, remember: true, force: false);
     }
 
     private void DriftFormula(double hour)
     {
-        if (_regions.Count == 0 || DateTime.UtcNow < _seaNotBefore)
+        if (_regions.Count == 0 || SeaWind.HourIndex(hour) == _arrowHour)
             return;
-        _seaNotBefore = DateTime.UtcNow.AddSeconds(2);
         var minute = SeaWind.MinuteOf(hour);
-        _seaScratch.Clear();
-        Field().Fill(_seaScratch, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), hour, null, false, null);
-        ApplySea(_seaScratch, minute, false, refresh: true);
+        PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), hour, minute, remember: true, force: false);
     }
 
-    private SeaWind.SeaField Field() => _seaField ??= SeaWind.SeaField.Build(_regions);
+    private void EnsureSeaForView(bool force)
+    {
+        if (_regions.Count == 0)
+            return;
+        if (_mode == MapMode.Live && _serverClock is ServerClock clock && SeaWind.Hour(clock, DateTime.UtcNow) is double hour)
+        {
+            var elapsed = Math.Max(0, (DateTime.UtcNow - clock.ReadUtc).TotalMilliseconds);
+            PublishSea(clock.ServerTimeMs + elapsed, hour, SeaWind.MinuteOf(hour), remember: true, force);
+            return;
+        }
+        if (_mode == MapMode.Live && _formulaHour is double formula)
+        {
+            PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), formula, SeaWind.MinuteOf(formula), remember: true, force);
+            return;
+        }
+        var minute = _mode == MapMode.Live && LiveMinute() is int live ? live : _viewMinute;
+        PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), minute / 60.0, minute, remember: false, force);
+    }
+
+    private void PublishSea(double worldMs, double hour, int minute, bool remember, bool force)
+    {
+        if (_regions.Count == 0)
+            return;
+        var bucket = SeaWind.HourIndex(hour);
+        if (!force && bucket == _arrowHour)
+            return;
+        _arrowHour = bucket;
+        _seaScratch.Clear();
+        Field().Fill(_seaScratch, worldMs, hour, _trackedZone, _trackedEdge, _trackedWeather);
+        if (remember)
+            RememberSea(minute, _seaScratch);
+        ApplySea(_seaScratch, minute, force: true, refresh: true);
+    }
+
+    private SeaWind.SeaField Field() => _seaField ??= SeaWind.SeaField.Build(_regions, WaterIds());
+
+    private HashSet<string>? WaterIds()
+    {
+        HashSet<string>? ids = null;
+        foreach (var (id, survey) in _surveys)
+        {
+            if (survey.OpenSea || survey.Edges != 0)
+                (ids ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+        }
+        return ids;
+    }
+
+    private void RefreshWaterWind()
+    {
+        _seaField = null;
+        _arrowHour = int.MinValue;
+        EnsureSeaForView(force: true);
+    }
 
     private void ApplySea(IReadOnlyDictionary<string, SeaWindArrow> arrows, int minute, bool force, bool refresh)
     {
@@ -287,7 +371,9 @@ public partial class MainWindow : Window
     private void StyleMode(System.Windows.Controls.Button button, bool on)
     {
         button.Background = (System.Windows.Media.Brush)FindResource(on ? "AccentBrush" : "PanelBrush");
-        button.Foreground = on ? System.Windows.Media.Brushes.White : (System.Windows.Media.Brush)FindResource("TextBrush");
+        button.Foreground = on
+            ? (System.Windows.Media.Brush)FindResource("InkBrush")
+            : (System.Windows.Media.Brush)FindResource("TextBrush");
     }
 
     private async void SyncClick(object sender, RoutedEventArgs e) => await SyncAsync();
@@ -346,31 +432,11 @@ public partial class MainWindow : Window
     {
         SearchPopup.IsOpen = false;
         Map.Select(region.Id);
-        Tile.ShowRegion(region, ReadingsFor(region.Id), _viewMinute, ArrowFor(region.Id));
+        Tile.ShowRegion(region, _viewMinute, ArrowFor(region.Id));
     }
-
-    private List<ObservationRow> ReadingsFor(string id) =>
-        _observations.TryGetValue(id, out var list) ? list : [];
 
     private WindSample? ArrowFor(string id) =>
         _arrows.TryGetValue(id, out var sample) ? sample : null;
-
-    private void OnWindSave(object? sender, WindReadingRequest request)
-    {
-        var saved = _database.SaveObservation(request.RegionId, _realm, request.GameMinute, request.DirectionDeg, request.Strength);
-        if (!_observations.TryGetValue(request.RegionId, out var list))
-            _observations[request.RegionId] = list = [];
-        var index = list.FindIndex(item => item.GameMinute == saved.GameMinute);
-        if (index >= 0)
-            list[index] = saved;
-        else
-            list.Add(saved);
-        list.Sort((a, b) => a.GameMinute.CompareTo(b.GameMinute));
-        RefreshArrows();
-        Tile.RefreshReadings(list);
-        var name = _byId.TryGetValue(request.RegionId, out var region) ? region.Name : "tile";
-        StatusText.Text = $"Saved {name} at {GameClock.Format(saved.GameMinute)}.";
-    }
 
     private void OnMetaSave(object? sender, TileMetaRequest request)
     {
@@ -381,23 +447,12 @@ public partial class MainWindow : Window
             region.Caption = TileIcons.CleanCaption(request.Caption);
             region.Icon = TileIcons.Canonical(request.Icon) ?? "";
             region.Tags = request.Tags.ToList();
-            StatusText.Text = $"Saved note, description, and mark for {region.Name}.";
+            StatusText.Text = $"Saved description, note, mark, and tags for {region.Name}.";
             if (Map.SelectedId == region.Id)
                 HoverText.Text = Describe(region);
         }
         Map.NoteChanged();
         RefreshArrows();
-    }
-
-    private void OnDeleteReading(object? sender, long id)
-    {
-        _database.DeleteObservation(id);
-        foreach (var list in _observations.Values)
-            list.RemoveAll(item => item.Id == id);
-        RefreshArrows();
-        if (Tile.RegionId is string regionId)
-            Tile.RefreshReadings(ReadingsFor(regionId));
-        StatusText.Text = "Reading deleted.";
     }
 
     private string Describe(RegionRow region)
@@ -412,15 +467,13 @@ public partial class MainWindow : Window
             text += " · " + string.Join(", ", region.Tags.Select(TagLabel));
         if (_arrows.TryGetValue(region.Id, out var sample))
         {
-            if (sample.Cancelled)
-                text += " · readings in this window point opposite ways";
-            else if (sample.Strength <= 0)
-                text += " · calm";
+            if (sample.Strength <= 0 || sample.Cancelled)
+                text += " · no wind arrow";
             else
-                text += $" · {CompassText.Mark(sample.Strength)} {CompassText.Going(sample.DirectionDeg)} · {sample.Count} reading{(sample.Count == 1 ? "" : "s")}";
+                text += $" · {CompassText.Mark(sample.Strength)} {CompassText.Going(sample.DirectionDeg)}";
         }
         else
-            text += " · no wind for this time";
+            text += " · no wind arrow";
         if (!string.IsNullOrWhiteSpace(region.Note))
         {
             var note = region.Note.ReplaceLineEndings(" ");
@@ -441,11 +494,23 @@ public partial class MainWindow : Window
         return tag;
     }
 
-    private void DayClick(object sender, RoutedEventArgs e) => ApplyMode(MapMode.Day);
+    private void DayClick(object sender, RoutedEventArgs e)
+    {
+        ApplyMode(MapMode.Day);
+        PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), WindRules.DayViewMinute / 60.0, WindRules.DayViewMinute, remember: false, force: true);
+    }
 
-    private void NightClick(object sender, RoutedEventArgs e) => ApplyMode(MapMode.Night);
+    private void NightClick(object sender, RoutedEventArgs e)
+    {
+        ApplyMode(MapMode.Night);
+        PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), WindRules.NightViewMinute / 60.0, WindRules.NightViewMinute, remember: false, force: true);
+    }
 
-    private void LiveClick(object sender, RoutedEventArgs e) => ApplyMode(MapMode.Live);
+    private void LiveClick(object sender, RoutedEventArgs e)
+    {
+        ApplyMode(MapMode.Live);
+        EnsureSeaForView(force: true);
+    }
 
     private void FitClick(object sender, RoutedEventArgs e) => Map.FitAll();
 
@@ -473,29 +538,35 @@ public partial class MainWindow : Window
         StatusText.Text = $"Showing {item.Label} wind.";
     }
 
+    private void NoticeClick(object sender, RoutedEventArgs e)
+    {
+        var notice = new NoticeWindow(viewOnly: true) { Owner = this };
+        notice.ShowDialog();
+    }
+
     private void ExportClick(object sender, RoutedEventArgs e)
     {
         var snapshot = _database.Export(_realm, _worldId);
         var dialog = new SaveFileDialog
         {
-            Filter = "Wind map JSON (*.json)|*.json",
-            FileName = $"asciilands-wind-{_realm}.json",
-            Title = "Export wind map",
+            Filter = "Tile notes JSON (*.json)|*.json",
+            FileName = $"asciilands-tiles-{_realm}.json",
+            Title = "Export tile notes",
         };
         if (dialog.ShowDialog(this) != true)
             return;
         MapExchange.Write(dialog.FileName, snapshot);
         StatusText.Text = snapshot.Tiles.Count == 0
-            ? "Exported an empty wind map."
-            : $"Exported {snapshot.Tiles.Count} tiles for {Realms.Label(_realm)}.";
+            ? "Exported an empty tile file."
+            : $"Exported notes for {snapshot.Tiles.Count} tiles in {Realms.Label(_realm)}.";
     }
 
     private void ImportClick(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog
         {
-            Filter = "Wind map JSON (*.json)|*.json",
-            Title = "Import a wind map",
+            Filter = "Tile notes JSON (*.json)|*.json",
+            Title = "Import tile notes",
         };
         if (dialog.ShowDialog(this) != true)
             return;
@@ -515,7 +586,7 @@ public partial class MainWindow : Window
         {
             var answer = MessageBox.Show(this,
                 $"This file is for {Realms.Label(snapshot.Realm)}. Import it there and switch to that realm?",
-                "Import wind map",
+                "Import tile notes",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Question);
             if (answer != MessageBoxResult.Yes)
@@ -529,7 +600,6 @@ public partial class MainWindow : Window
         }
 
         var analysis = _database.Analyze(snapshot);
-        var hasSync = (snapshot.Tiles ?? []).Any(tile => (tile.Observations ?? []).Any(IsSyncReading));
         IReadOnlySet<string> replace = new HashSet<string>(StringComparer.Ordinal);
         if (analysis.Conflicts.Count > 0)
         {
@@ -538,10 +608,10 @@ public partial class MainWindow : Window
                 return;
             replace = window.ReplaceIds;
         }
-        else if (analysis.Adds.Count == 0 && !hasSync)
+        else if (analysis.Adds.Count == 0)
         {
             StatusText.Text = analysis.Unchanged == 0
-                ? "That file has no wind to import." + UnknownSuffix(analysis.UnknownIds.Count)
+                ? "That file has no tile notes to import." + UnknownSuffix(analysis.UnknownIds.Count)
                 : $"Nothing new. {analysis.Unchanged} tile{(analysis.Unchanged == 1 ? "" : "s")} already match." + UnknownSuffix(analysis.UnknownIds.Count);
             return;
         }
@@ -549,19 +619,15 @@ public partial class MainWindow : Window
         var result = _database.ApplyImport(snapshot, replace);
         LoadFromDatabase();
         StatusText.Text = $"Imported {result.Added} new, updated {result.Replaced}, kept {result.Kept}."
-            + (hasSync ? " Calculated sea wind was stored apart from hand readings." : "")
             + UnknownSuffix(result.Unknown);
     }
-
-    private static bool IsSyncReading(ReadingSnapshot reading) =>
-        string.Equals(reading.Source, "sync", StringComparison.OrdinalIgnoreCase);
 
     private async void GameSyncToggled(object sender, RoutedEventArgs e)
     {
         if (GameSyncButton.IsChecked == true)
         {
-            ApplySyncSeconds();
             StyleSync(true);
+            _gameTimer.Interval = TimeSpan.FromSeconds(5);
             _gameTimer.Start();
             await PollGameAsync();
             return;
@@ -571,32 +637,15 @@ public partial class MainWindow : Window
         _gameVersion++;
         StyleSync(false);
         SyncStatus.Text = "";
-        StatusText.Text = "Sync is off. The last wind and location stay on the map.";
-    }
-
-    private void SyncSecondsChanged(object sender, RoutedEventArgs e) => ApplySyncSeconds();
-
-    private void SyncSecondsKey(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Enter)
-            return;
-        ApplySyncSeconds();
-        e.Handled = true;
-    }
-
-    private void ApplySyncSeconds()
-    {
-        _syncSeconds = SyncPace.ParseOrClamp(SyncSecondsBox.Text, _syncSeconds);
-        SyncSecondsBox.Text = _syncSeconds.ToString(CultureInfo.InvariantCulture);
-        _database.SetSetting("sync_seconds", SyncSecondsBox.Text);
-        _gameTimer.Interval = TimeSpan.FromSeconds(_syncSeconds);
+        StatusText.Text = "Sync is off until you turn it on or open the app again. The last wind and location stay on the map.";
+        _ = ClearOverlayAsync();
     }
 
     private void StyleSync(bool on)
     {
         GameSyncButton.Background = (System.Windows.Media.Brush)FindResource(on ? "AccentBrush" : "PanelBrush");
         GameSyncButton.Foreground = on
-            ? System.Windows.Media.Brushes.White
+            ? (System.Windows.Media.Brush)FindResource("InkBrush")
             : (System.Windows.Media.Brush)FindResource("TextBrush");
     }
 
@@ -613,6 +662,9 @@ public partial class MainWindow : Window
             if (version != _gameVersion || GameSyncButton.IsChecked != true)
                 return;
             ApplyGame(game);
+            if (!game.FromScreen && game.Detail is "ok" or "no-clock" or "visible")
+                await ReadStandingChartAsync();
+            FollowGps();
         }
         catch (Exception)
         {
@@ -661,10 +713,12 @@ public partial class MainWindow : Window
             {
                 place = region.Name;
                 _player = new PlayerMark(region.Q, region.R, region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase));
+                _playerZone = region.Id;
             }
             else
             {
                 _player = null;
+                _playerZone = null;
                 unknown = true;
                 if (place.Length == 0)
                     place = zoneId;
@@ -688,12 +742,8 @@ public partial class MainWindow : Window
             minute = SeaWind.MinuteOf(hour);
             _formulaHour = null;
             var elapsed = Math.Max(0, (DateTime.UtcNow - clock.ReadUtc).TotalMilliseconds);
-            _seaScratch.Clear();
-            Field().Fill(_seaScratch, clock.ServerTimeMs + elapsed, hour, _trackedZone, _trackedEdge, _trackedWeather);
-            RememberSea(minute.Value, _seaScratch);
-            ApplySea(_seaScratch, minute.Value, true, refresh: false);
-            _seaNotBefore = DateTime.UtcNow.AddSeconds(2);
-            seaNote = $"Sea wind filled for {_seaScratch.Count} ocean tiles.";
+            PublishSea(clock.ServerTimeMs + elapsed, hour, minute.Value, remember: true, force: false);
+            seaNote = $"Sea wind is held for this in-game hour on {_seaScratch.Count} ocean tiles.";
             if (windRead && !string.IsNullOrEmpty(zoneId) && _seaScratch.TryGetValue(zoneId, out var calculated))
             {
                 var liveFrom = CompassText.Point(liveGoing + 180);
@@ -748,12 +798,8 @@ public partial class MainWindow : Window
         _trackedZone = null;
         _trackedWeather = null;
         var worldMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _seaScratch.Clear();
-        Field().Fill(_seaScratch, worldMs, hour, null, false, null);
-        RememberSea(minute, _seaScratch);
-        ApplySea(_seaScratch, minute, true, refresh: false);
-        _seaNotBefore = DateTime.UtcNow.AddSeconds(2);
-        var note = $"Sea wind follows the game clock on {_seaScratch.Count} ocean tiles and keeps moving with the time.";
+        PublishSea(worldMs, hour, minute, remember: true, force: false);
+        var note = $"Sea wind is held for this in-game hour on {_seaScratch.Count} ocean tiles.";
         if (!windRead || string.IsNullOrEmpty(zoneId) || !_byId.TryGetValue(zoneId, out var standing))
             return (note, null);
 
@@ -769,16 +815,8 @@ public partial class MainWindow : Window
         return (note + $" This hex agrees: wind from {calcFrom}.", null);
     }
 
-    private void RememberSea(int minute, IReadOnlyDictionary<string, SeaWindArrow> arrows)
-    {
-        var now = DateTime.UtcNow;
-        var windowChanged = _seaSavedMinute >= 0 && WindRules.WindowOf(minute) != WindRules.WindowOf(_seaSavedMinute);
-        if (!windowChanged && _seaSavedMinute >= 0 && (now - _seaSavedUtc).TotalSeconds < 30)
-            return;
+    private void RememberSea(int minute, IReadOnlyDictionary<string, SeaWindArrow> arrows) =>
         _database.ReplaceSyncWind(_realm, minute, arrows);
-        _seaSavedMinute = minute;
-        _seaSavedUtc = now;
-    }
 
     private static Dictionary<string, ObservationRow> ToSyncRows(IReadOnlyDictionary<string, SeaWindArrow> arrows, int minute)
     {
@@ -867,6 +905,509 @@ public partial class MainWindow : Window
             SearchBox.Focus();
             SearchBox.SelectAll();
             e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Escape && _gpsPicking)
+        {
+            _gpsPicking = false;
+            StatusText.Text = "GPS destination cancelled.";
+            e.Handled = true;
+        }
+    }
+
+    private void OnRegionClicked(RegionRow region)
+    {
+        if (_gpsPicking && _gpsMode is TravelMode mode)
+        {
+            _gpsPicking = false;
+            if (string.IsNullOrEmpty(_playerZone) || !_byId.ContainsKey(_playerZone))
+            {
+                StatusText.Text = "Sync has not found your hex yet. Open the game, then pick the destination again.";
+                return;
+            }
+            var plan = ComputeRoute(mode, region.Id);
+            if (!plan.Found)
+            {
+                StatusText.Text = plan.Status;
+                return;
+            }
+            _gpsDestinationId = region.Id;
+            _gpsPlan = plan;
+            PaintRoute();
+            StatusText.Text = plan.Status;
+            _ = RefreshOverlayAsync();
+            return;
+        }
+        OpenRegion(region);
+    }
+
+    private void GpsClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new GpsWindow(_gpsPlan != null) { Owner = this };
+        if (dialog.ShowDialog() != true)
+            return;
+        if (dialog.Choice == GpsChoice.Clear)
+        {
+            ClearGps();
+            StatusText.Text = "GPS route cleared.";
+            return;
+        }
+        if (dialog.Choice is not (GpsChoice.Boat or GpsChoice.Walk))
+            return;
+        _gpsMode = dialog.Choice == GpsChoice.Boat ? TravelMode.Boat : TravelMode.Walk;
+        _gpsPicking = true;
+        StatusText.Text = _gpsMode == TravelMode.Boat
+            ? "Boat. Click the destination hex. Escape cancels."
+            : "Walk. Click the destination hex. Escape cancels.";
+    }
+
+    private async void UpdateMapClick(object sender, RoutedEventArgs e)
+    {
+        if (_closing)
+            return;
+        UpdateMapButton.IsEnabled = false;
+        try
+        {
+            StatusText.Text = "Reading revealed tiles from the game map…";
+            using var cancel = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            var visited = await GameBrowser.ReadVisitedAsync(_debugHttp, cancel.Token);
+            var fromScreen = false;
+            if (_closing)
+                return;
+            if (visited == null)
+            {
+                StatusText.Text = "Reading the open map…";
+                var screen = await Task.Run(GameBrowser.ReadAtlas, cancel.Token);
+                if (_closing)
+                    return;
+                if (screen == null)
+                {
+                    StatusText.Text = "The play page could not be read. Open it in Edge or Chrome, with the map on screen.";
+                    return;
+                }
+                if (!screen.MapOpen)
+                {
+                    StatusText.Text = "Open the map in the game with M, then press Update map.";
+                    return;
+                }
+                if (screen.Hits.Count == 0)
+                {
+                    StatusText.Text = "No revealed tiles are on the open map. Pan the game map and press Update map again.";
+                    return;
+                }
+                var nodes = await WorldGraph.DownloadAsync(_http, cancel.Token);
+                if (_closing)
+                    return;
+                var placement = AtlasPlace.Place(screen.Hits, nodes);
+                visited = new VisitedRead
+                {
+                    MapOpen = true,
+                    Tiles = placement.Tiles.Select(tile => new VisitedTile
+                    {
+                        Id = tile.Id,
+                        Name = tile.Name,
+                        OpenSea = tile.OpenSea,
+                        PngUrl = tile.PngUrl,
+                    }).ToList(),
+                };
+                fromScreen = true;
+                foreach (var name in placement.Unresolved)
+                    visited.Tiles.Add(new VisitedTile { Name = name });
+            }
+            if (!visited.MapOpen)
+            {
+                StatusText.Text = "Open the map in the game with M, then press Update map.";
+                return;
+            }
+
+            var pending = new List<(string RegionId, bool OpenSea, string Url)>();
+            var skipped = 0;
+            var unknown = new List<string>();
+            foreach (var tile in visited.Tiles)
+            {
+                if (!SurveyMatch.TryMatch(_regions, tile.Id, tile.Name, out var regionId, out var problem))
+                {
+                    if (!string.IsNullOrWhiteSpace(problem))
+                        unknown.Add(problem);
+                    continue;
+                }
+                if (_surveys.ContainsKey(regionId))
+                {
+                    skipped++;
+                    continue;
+                }
+                pending.Add((regionId, tile.OpenSea, tile.PngUrl));
+            }
+
+            var added = 0;
+            var cache = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
+            var urls = pending.Select(item => item.Url).Where(url => url.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+            for (var offset = 0; offset < urls.Count; offset += 4)
+            {
+                var batch = urls.Skip(offset).Take(4).ToList();
+                StatusText.Text = $"Reading tile pictures {Math.Min(offset + batch.Count, urls.Count)} of {urls.Count}…";
+                if (fromScreen)
+                {
+                    foreach (var (url, bytes) in await GameBrowser.DownloadPngsAsync(_http, batch, cancel.Token))
+                        cache[url] = bytes;
+                }
+                else
+                {
+                    var fetched = await GameBrowser.FetchPngsAsync(_debugHttp, batch, cancel.Token);
+                    foreach (var row in fetched)
+                    {
+                        if (string.IsNullOrWhiteSpace(row.Png))
+                        {
+                            cache[row.Url] = null;
+                            continue;
+                        }
+                        try
+                        {
+                            cache[row.Url] = Convert.FromBase64String(row.Png);
+                        }
+                        catch (FormatException)
+                        {
+                            cache[row.Url] = null;
+                        }
+                    }
+                }
+                if (_closing)
+                    return;
+            }
+
+            foreach (var item in pending)
+            {
+                byte[]? png = null;
+                if (item.Url.Length > 0)
+                    cache.TryGetValue(item.Url, out png);
+                if (png == null && !item.OpenSea)
+                    continue;
+                StoreSurvey(item.RegionId, png, item.OpenSea, paint: false, refreshWind: false);
+                added++;
+            }
+            if (added > 0)
+            {
+                Map.SetPictures(_surveyPictures);
+                RefreshWaterWind();
+            }
+
+            var missed = unknown.Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
+            var extra = unknown.Distinct(StringComparer.OrdinalIgnoreCase).Count() - missed.Count;
+            var names = missed.Count == 0
+                ? ""
+                : " Skipped " + string.Join(", ", missed) + (extra > 0 ? $" and {extra} more" : "") + ".";
+            var offScreen = fromScreen ? " Tiles off this view stay unread until the map shows them." : "";
+            StatusText.Text = $"Update map added {added} tiles and left {skipped} already stored.{names}{offScreen}";
+        }
+        catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException or InvalidDataException)
+        {
+            if (!_closing)
+                StatusText.Text = "Update map could not finish reading the game.";
+        }
+        finally
+        {
+            UpdateMapButton.IsEnabled = true;
+        }
+    }
+
+    private async Task ReadStandingChartAsync()
+    {
+        if (_closing || GameSyncButton.IsChecked != true)
+            return;
+        try
+        {
+            using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var chart = await GameBrowser.ReadCurrentChartAsync(_debugHttp, cancel.Token);
+            if (_closing || chart == null || GameSyncButton.IsChecked != true)
+                return;
+            if (!SurveyMatch.TryMatch(_regions, chart.ZoneId, chart.Name, out var regionId, out _))
+                return;
+            byte[]? png = null;
+            if (!string.IsNullOrWhiteSpace(chart.Png))
+            {
+                try
+                {
+                    png = Convert.FromBase64String(chart.Png);
+                }
+                catch (FormatException)
+                {
+                    png = null;
+                }
+            }
+            if (png == null && (!chart.OpenSea || _surveys.ContainsKey(regionId)))
+                return;
+            StoreSurvey(regionId, png, chart.OpenSea);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException or FormatException)
+        {
+        }
+    }
+
+    private void LoadSurveys()
+    {
+        _surveys.Clear();
+        _surveyPictures.Clear();
+        foreach (var survey in _database.LoadSurveys())
+        {
+            var profile = ProfileOf(survey.Png, survey.OpenSea, survey.Edges);
+            _surveys[survey.RegionId] = new TileSurvey
+            {
+                RegionId = survey.RegionId,
+                Edges = profile.Edges,
+                Png = survey.Png,
+                OpenSea = survey.OpenSea,
+                Touch = profile.Touch,
+                Spans = profile.Spans,
+            };
+            if (survey.Png is { Length: > 0 })
+            {
+                var image = ChartImage.Bitmap(survey.Png);
+                if (image != null)
+                    _surveyPictures[survey.RegionId] = image;
+            }
+        }
+        Map.SetPictures(_surveyPictures);
+    }
+
+    private void StoreSurvey(string regionId, byte[]? png, bool openSea, bool paint = true, bool refreshWind = true)
+    {
+        var profile = ProfileOf(png, openSea, 0);
+        var edges = profile.Edges;
+        var wasWater = _surveys.TryGetValue(regionId, out var existing) && (existing.OpenSea || existing.Edges != 0);
+        if (existing != null
+            && existing.Edges == edges
+            && existing.OpenSea == openSea
+            && existing.Touch == profile.Touch
+            && existing.Spans == profile.Spans
+            && SameBytes(existing.Png, png))
+            return;
+
+        _database.SaveSurvey(regionId, edges, png, openSea);
+        _surveys[regionId] = new TileSurvey
+        {
+            RegionId = regionId,
+            Edges = edges,
+            Png = png,
+            OpenSea = openSea,
+            Touch = profile.Touch,
+            Spans = profile.Spans,
+        };
+        if (png is { Length: > 0 })
+        {
+            var image = ChartImage.Bitmap(png);
+            if (image != null)
+                _surveyPictures[regionId] = image;
+        }
+        else
+            _surveyPictures.Remove(regionId);
+        if (paint)
+            Map.SetPictures(_surveyPictures);
+        if (refreshWind && wasWater != (openSea || edges != 0))
+            RefreshWaterWind();
+    }
+
+    private static WaterProfile ProfileOf(byte[]? png, bool openSea, byte fallbackEdges)
+    {
+        if (openSea)
+            return WaterProfile.Open;
+        if (png is not { Length: > 0 })
+            return new WaterProfile(fallbackEdges, 0, 0);
+        var pixels = ChartImage.Pixels(png, out var width, out var height, out var stride);
+        if (pixels == null)
+            return new WaterProfile(fallbackEdges, 0, 0);
+        return WaterEdges.FromBgra(width, height, pixels, stride);
+    }
+
+    private static bool SameBytes(byte[]? left, byte[]? right)
+    {
+        if (left == null || right == null)
+            return left == null && right == null;
+        return left.AsSpan().SequenceEqual(right);
+    }
+
+    private RoutePlan ComputeRoute(TravelMode mode, string destinationId)
+    {
+        var start = _playerZone ?? "";
+        var hexes = new List<RouteHex>(_regions.Count);
+        foreach (var region in _regions)
+        {
+            var ocean = region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase);
+            byte water = 0;
+            ulong touch = 0;
+            ulong spans = 0;
+            if (_surveys.TryGetValue(region.Id, out var survey))
+            {
+                water = survey.OpenSea ? WaterMask.All : survey.Edges;
+                touch = survey.Touch;
+                spans = survey.Spans;
+            }
+            hexes.Add(new RouteHex(region.Id, region.Q, region.R, ocean, water, touch, spans));
+        }
+        var wind = new Dictionary<string, WindAt>(StringComparer.Ordinal);
+        foreach (var (id, sample) in _arrows)
+        {
+            if (!sample.Cancelled && sample.Strength > 0)
+                wind[id] = new WindAt(sample.DirectionDeg, sample.Strength);
+        }
+        return RouteFinder.Find(hexes, start, destinationId, mode, wind, id => _byId.TryGetValue(id, out var region) ? region.Name : id);
+    }
+
+    private void FollowGps()
+    {
+        if (_gpsPlan == null || _gpsPlan.Steps.Count == 0 || _gpsMode == null || _gpsDestinationId == null || _playerZone == null)
+            return;
+        var index = RouteFinder.IndexOnRoute(_gpsPlan.Steps, _playerZone);
+        if (index >= 0)
+        {
+            PaintRoute();
+            return;
+        }
+        var plan = ComputeRoute(_gpsMode.Value, _gpsDestinationId);
+        _gpsPlan = plan.Found ? plan : null;
+        PaintRoute();
+        StatusText.Text = plan.Found
+            ? "Left the route. " + plan.Status
+            : "Left the route. " + plan.Status;
+    }
+
+    private void PaintRoute()
+    {
+        if (_gpsPlan == null || !_gpsPlan.Found)
+        {
+            Map.SetRoute(null);
+            return;
+        }
+        var index = _playerZone == null ? -1 : RouteFinder.IndexOnRoute(_gpsPlan.Steps, _playerZone);
+        var marks = new List<RouteMark>(_gpsPlan.Steps.Count);
+        for (var i = 0; i < _gpsPlan.Steps.Count; i++)
+        {
+            var step = _gpsPlan.Steps[i];
+            marks.Add(new RouteMark(step.RegionId, step.EnterSide, step.ExitSide, Passed: index >= 0 && i < index, Current: i == index));
+        }
+        Map.SetRoute(marks);
+    }
+
+    private void ClearGps()
+    {
+        _gpsPlan = null;
+        _gpsMode = null;
+        _gpsDestinationId = null;
+        _gpsPicking = false;
+        Map.SetRoute(null);
+        _ = ClearOverlayAsync();
+    }
+
+    private void MaybeOverlay()
+    {
+        if (_closing || _overlayBusy)
+            return;
+        if (_gpsPlan == null || !_gpsPlan.Found || GameSyncButton.IsChecked != true)
+        {
+            if (_overlayOnPage || _float is { IsVisible: true })
+                _ = ClearOverlayAsync();
+            return;
+        }
+        if ((DateTime.UtcNow - _overlayAt).TotalMilliseconds < 900)
+            return;
+        _ = RefreshOverlayAsync();
+    }
+
+    private async Task RefreshOverlayAsync()
+    {
+        if (!OverlayWanted() || _overlayBusy)
+            return;
+        _overlayBusy = true;
+        _overlayAt = DateTime.UtcNow;
+        try
+        {
+            var step = CurrentStep();
+            var sample = _playerZone != null && _arrows.TryGetValue(_playerZone, out var arrow) ? arrow : (WindSample?)null;
+            var words = MinimapOverlay.WindWords(sample);
+            var enter = step.EnterSide;
+            var exit = step.ExitSide;
+            var onPage = false;
+            try
+            {
+                var script = MinimapOverlay.InstallScript(words, enter, exit);
+                using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+                var json = await GameBrowser.InstallOverlayAsync(_debugHttp, script, cancel.Token);
+                onPage = json != null && json.Contains("true", StringComparison.Ordinal);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException)
+            {
+                onPage = false;
+            }
+            if (!OverlayWanted())
+                return;
+            if (onPage)
+            {
+                _overlayOnPage = true;
+                HideFloat();
+                return;
+            }
+
+            var box = await Task.Run(GameBrowser.MinimapBox);
+            if (!OverlayWanted())
+                return;
+            _overlayOnPage = false;
+            if (box is GameBrowser.ScreenBox place)
+                ShowFloat(place, words, enter, exit);
+            else
+                HideFloat();
+        }
+        finally
+        {
+            _overlayBusy = false;
+        }
+    }
+
+    private bool OverlayWanted() =>
+        !_closing && _gpsPlan is { Found: true } && GameSyncButton.IsChecked == true;
+
+    private void ShowFloat(GameBrowser.ScreenBox box, string wind, int enter, int exit)
+    {
+        _float ??= new MinimapFloat();
+        _float.ShowOver(this, box.X, box.Y, box.Width, box.Height, wind, enter, exit);
+    }
+
+    private void HideFloat()
+    {
+        if (_float is { IsVisible: true })
+            _float.Hide();
+    }
+
+    private RouteStep CurrentStep()
+    {
+        if (_gpsPlan == null || _playerZone == null)
+            return new RouteStep("", -1, -1);
+        var index = RouteFinder.IndexOnRoute(_gpsPlan.Steps, _playerZone);
+        if (index < 0)
+            return new RouteStep(_playerZone, -1, -1);
+        var step = _gpsPlan.Steps[index];
+        var enter = index == 0 ? -1 : step.EnterSide;
+        return step with { EnterSide = enter };
+    }
+
+    private async Task ClearOverlayAsync()
+    {
+        if (_closing)
+            return;
+        HideFloat();
+        if (!_overlayOnPage)
+            return;
+        _overlayBusy = true;
+        try
+        {
+            using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await GameBrowser.RemoveOverlayAsync(_debugHttp, cancel.Token);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException)
+        {
+        }
+        finally
+        {
+            _overlayOnPage = false;
+            _overlayBusy = false;
         }
     }
 

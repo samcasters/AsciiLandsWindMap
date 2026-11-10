@@ -37,6 +37,12 @@ public static class BiomePalette
         ["unknown_land"] = Rgb(120, 114, 104),
     };
 
+    public const double NightKeep = 0.58;
+    private const byte NightLiftByte = 16;
+
+    /// <summary>The flat color NightKeep blends toward. Revealed pictures use this same mix.</summary>
+    public static SolidColorBrush NightLift { get; } = Freeze(Color.FromRgb(NightLiftByte, NightLiftByte, NightLiftByte));
+
     private static readonly Dictionary<(string Biome, bool Night), SolidColorBrush> Brushes = new();
 
     public static SolidColorBrush BrushFor(string? biome, bool night)
@@ -72,10 +78,16 @@ public static class BiomePalette
 
     private static Color Darken(Color color)
     {
-        const double keep = 0.58;
-        byte Mix(byte value) => (byte)(value * keep + 16 * (1 - keep));
+        byte Mix(byte value) => (byte)(value * NightKeep + NightLiftByte * (1 - NightKeep));
         return Rgb(Mix(color.R), Mix(color.G), Mix(color.B));
     }
 
     private static Color Rgb(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
+
+    private static SolidColorBrush Freeze(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
 }

@@ -1,0 +1,33 @@
+<Window x:Class="AsciiLandsWindMap.NoticeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Before you use AsciiLands Wind Map"
+        Width="680" Height="720"
+        MinWidth="520" MinHeight="420"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        Background="{DynamicResource BgBrush}"
+        Foreground="{DynamicResource TextBrush}"
+        FontFamily="Trebuchet MS" FontSize="15">
+  <Grid Margin="22">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock x:Name="Heading" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap"/>
+    <TextBox x:Name="BodyBox" Grid.Row="1" Margin="0,14,0,16"
+             IsReadOnly="True" IsReadOnlyCaretVisible="True" BorderThickness="0"
+             Background="Transparent" Foreground="{DynamicResource TextBrush}"
+             CaretBrush="{DynamicResource TextBrush}" TextWrapping="Wrap"
+             VerticalScrollBarVisibility="Auto" FontFamily="Trebuchet MS" FontSize="15"/>
+    <StackPanel x:Name="ChoiceBar" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="DeclineButton" Content="Decline and quit" MinWidth="150" Padding="12,8" Click="DeclineClick" IsCancel="True"/>
+      <Button Content="I accept" MinWidth="150" Margin="10,0,0,0" Padding="12,8" Click="AcceptClick"
+              Background="{DynamicResource AccentBrush}" Foreground="{DynamicResource InkBrush}"/>
+    </StackPanel>
+    <StackPanel x:Name="CloseBar" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Visibility="Collapsed">
+      <Button Content="Close" MinWidth="150" Padding="12,8" Click="CloseClick" IsCancel="True" IsDefault="True"/>
+    </StackPanel>
+  </Grid>
+</Window>

@@ -29,6 +29,44 @@ public sealed class GameSnapshot
     public IReadOnlyList<string> NearbyNames { get; init; } = [];
 }
 
+public sealed class ChartRead
+{
+    public string ZoneId { get; set; } = "";
+    public string Name { get; set; } = "";
+    public bool OpenSea { get; set; }
+    public string Href { get; set; } = "";
+    public string Png { get; set; } = "";
+    public string Error { get; set; } = "";
+    public bool Found { get; set; }
+}
+
+public sealed class VisitedRead
+{
+    public bool MapOpen { get; set; }
+    public List<VisitedTile> Tiles { get; set; } = [];
+}
+
+public sealed class VisitedTile
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public bool OpenSea { get; set; }
+    public string PngUrl { get; set; } = "";
+}
+
+public sealed class FetchedPng
+{
+    public string Url { get; set; } = "";
+    public string Png { get; set; } = "";
+    public string Error { get; set; } = "";
+}
+
+public sealed class AtlasScreen
+{
+    public bool MapOpen { get; init; }
+    public List<AtlasHit> Hits { get; init; } = [];
+}
+
 public static class GameBrowser
 {
     private const string ReadScript = """
@@ -479,12 +517,13 @@ public static class GameBrowser
 
     private static string First(params string[] paths) => paths.FirstOrDefault(File.Exists) ?? paths[0];
 
-    private static async Task<string> ReceiveAsync(ClientWebSocket web, int id, CancellationToken cancellationToken)
+    private static async Task<string> ReceiveAsync(ClientWebSocket web, int id, CancellationToken cancellationToken, int maxBytes = 1024 * 1024)
     {
         var buffer = new byte[1024 * 64];
         using var message = new MemoryStream();
         var messages = 0;
-        while (messages++ < 40 && message.Length < 1024 * 1024)
+        var limit = Math.Max(40, maxBytes / buffer.Length + 8);
+        while (messages++ < limit && message.Length < maxBytes)
         {
             var result = await web.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (result.MessageType == WebSocketMessageType.Close)
@@ -499,6 +538,435 @@ public static class GameBrowser
         }
 
         throw new WebSocketException("The browser debug reply did not arrive.");
+    }
+
+    private const int ChartBytes = 6 * 1024 * 1024;
+
+    private const string CurrentChartScript = """
+        (async () => {
+          const state = window.ak_wsState || {};
+          const id = String(state.currentZoneId || '');
+          const graph = window.ak_worldGraphState;
+          const nodes = graph && graph.data && graph.data.nodes;
+          let node = null;
+          if (Array.isArray(nodes)) node = nodes.find(n => n && String(n.id) === id) || null;
+          const openSea = !!(node && node.open_sea);
+          const name = String(state.currentZoneName || (node && node.name) || '');
+          const img = document.querySelector('#minimap-svg image[data-terrain-map]');
+          let href = '';
+          if (img) href = (img.href && img.href.baseVal) || img.getAttribute('href') || '';
+          if (!href && node && node.map_rel) href = String(node.map_rel).replace(/\.a3d$/, '.minimap.png');
+          let png = '';
+          let error = '';
+          if (href) {
+            try {
+              const abs = new URL(href, location.href).href;
+              const res = await fetch(abs);
+              if (!res.ok) error = 'http ' + res.status;
+              else {
+                const bytes = new Uint8Array(await res.arrayBuffer());
+                let binary = '';
+                const chunk = 0x8000;
+                for (let i = 0; i < bytes.length; i += chunk)
+                  binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+                png = btoa(binary);
+                href = abs;
+              }
+            } catch (e) {
+              error = String(e && e.message || e);
+            }
+          }
+          return { zoneId: id, name, openSea, href, png, error, found: !!document.getElementById('minimap-svg') };
+        })()
+        """;
+
+    private const string VisitedScript = """
+        (() => {
+          const graph = window.ak_worldGraphState;
+          const raw = graph && graph.data && graph.data.nodes;
+          const list = Array.isArray(raw) ? raw : [];
+          const disc = (graph && graph.discovery && graph.discovery.zones) || {};
+          const current = String((window.ak_wsState && window.ak_wsState.currentZoneId) || '');
+          const mapOpen = typeof ak_uiState !== 'undefined' && !!ak_uiState.travelOpen;
+          const tiles = [];
+          for (const node of list) {
+            if (!node || !node.id) continue;
+            const id = String(node.id);
+            const state = id === current ? 'visited' : String(disc[id] || '').toLowerCase();
+            if (state !== 'visited' && state !== 'discovered') continue;
+            const rel = node.map_rel ? String(node.map_rel).replace(/\.a3d$/, '.minimap.png') : '';
+            let pngUrl = '';
+            if (rel) {
+              try { pngUrl = new URL(rel, location.href).href; } catch (e) { pngUrl = rel; }
+            }
+            tiles.push({ id, name: node.name ? String(node.name) : '', openSea: !!node.open_sea, pngUrl });
+          }
+          return { mapOpen, tiles };
+        })()
+        """;
+
+    public static Task<ChartRead?> ReadCurrentChartAsync(HttpClient http, CancellationToken cancellationToken) =>
+        ReadJsonAsync<ChartRead>(http, CurrentChartScript, awaitPromise: true, cancellationToken);
+
+    public static Task<VisitedRead?> ReadVisitedAsync(HttpClient http, CancellationToken cancellationToken) =>
+        ReadJsonAsync<VisitedRead>(http, VisitedScript, awaitPromise: false, cancellationToken);
+
+    public readonly record struct ScreenBox(double X, double Y, double Width, double Height);
+
+    public static ScreenBox? MinimapBox()
+    {
+        try
+        {
+            foreach (var name in new[] { "chrome", "msedge", "firefox" })
+            {
+                foreach (var process in Process.GetProcessesByName(name))
+                {
+                    try
+                    {
+                        if (process.MainWindowHandle == IntPtr.Zero)
+                            continue;
+                        var title = process.MainWindowTitle ?? "";
+                        if (!title.Contains("Asciilands", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        var window = AutomationElement.FromHandle(process.MainWindowHandle);
+                        var minimap = FindById(window, "minimap-svg", 8000);
+                        if (minimap == null)
+                            continue;
+                        var rect = minimap.Current.BoundingRectangle;
+                        if (rect.Width < 40 || rect.Height < 40)
+                            continue;
+                        return new ScreenBox(rect.X, rect.Y, rect.Width, rect.Height);
+                    }
+                    catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+                    {
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+        }
+        return null;
+    }
+
+    public static AtlasScreen? ReadAtlas()
+    {
+        try
+        {
+            return ReadAtlasCore();
+        }
+        catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            return null;
+        }
+    }
+
+    private static AtlasScreen? ReadAtlasCore()
+    {
+        AtlasScreen? closed = null;
+        foreach (var name in new[] { "chrome", "msedge", "firefox" })
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    if (process.MainWindowHandle == IntPtr.Zero)
+                        continue;
+                    var title = process.MainWindowTitle ?? "";
+                    if (!title.Contains("Asciilands", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var window = AutomationElement.FromHandle(process.MainWindowHandle);
+                    var map = FindById(window, "travel-worldmap", 20000);
+                    if (map == null)
+                    {
+                        closed ??= new AtlasScreen { MapOpen = false };
+                        continue;
+                    }
+                    var rect = map.Current.BoundingRectangle;
+                    if (rect.Width < 80 || rect.Height < 80)
+                    {
+                        closed ??= new AtlasScreen { MapOpen = false };
+                        continue;
+                    }
+                    return new AtlasScreen { MapOpen = true, Hits = CollectHits(map) };
+                }
+                catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+        }
+        return closed;
+    }
+
+    private static AutomationElement? FindById(AutomationElement root, string id, int cap)
+    {
+        var walker = TreeWalker.RawViewWalker;
+        var stack = new Stack<AutomationElement>();
+        stack.Push(root);
+        var seen = 0;
+        while (stack.Count > 0 && seen++ < cap)
+        {
+            var element = stack.Pop();
+            string current;
+            try
+            {
+                current = element.Current.AutomationId ?? "";
+            }
+            catch (ElementNotAvailableException)
+            {
+                continue;
+            }
+            if (current == id)
+                return element;
+            PushChildren(walker, stack, element);
+        }
+        return null;
+    }
+
+    private static List<AtlasHit> CollectHits(AutomationElement map)
+    {
+        var raw = new List<(string Name, double X, double Y, double W, double H)>();
+        var walker = TreeWalker.RawViewWalker;
+        var stack = new Stack<AutomationElement>();
+        PushChildren(walker, stack, map);
+        var seen = 0;
+        while (stack.Count > 0 && seen++ < 30000)
+        {
+            var element = stack.Pop();
+            string name;
+            try
+            {
+                name = element.Current.Name ?? "";
+            }
+            catch (ElementNotAvailableException)
+            {
+                continue;
+            }
+            var place = AtlasLabel.PlaceName(name);
+            if (place != null && !MarkedUnexplored(element))
+            {
+                try
+                {
+                    var rect = element.Current.BoundingRectangle;
+                    if (rect.Width > 20 && rect.Height > 20)
+                        raw.Add((place, rect.X + rect.Width / 2, rect.Y + rect.Height / 2, rect.Width, rect.Height));
+                }
+                catch (ElementNotAvailableException)
+                {
+                }
+            }
+            PushChildren(walker, stack, element);
+        }
+        if (raw.Count == 0)
+            return [];
+        var widths = raw.Select(item => item.W).OrderBy(value => value).ToArray();
+        var heights = raw.Select(item => item.H).OrderBy(value => value).ToArray();
+        var midWidth = widths[widths.Length / 2];
+        var midHeight = heights[heights.Length / 2];
+        var hits = new List<AtlasHit>();
+        var occupied = new HashSet<(int X, int Y, string Name)>();
+        foreach (var item in raw)
+        {
+            if (item.W < midWidth * 0.82 || item.W > midWidth * 1.18 || item.H < midHeight * 0.82 || item.H > midHeight * 1.18)
+                continue;
+            var cell = ((int)Math.Round(item.X / 8.0), (int)Math.Round(item.Y / 8.0), item.Name.ToLowerInvariant());
+            if (!occupied.Add(cell))
+                continue;
+            hits.Add(new AtlasHit(item.Name, item.X, item.Y));
+        }
+        return hits;
+    }
+
+    private static bool MarkedUnexplored(AutomationElement element)
+    {
+        AutomationElement? child;
+        var walker = TreeWalker.RawViewWalker;
+        try
+        {
+            child = walker.GetFirstChild(element);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return false;
+        }
+        var count = 0;
+        while (child != null && count++ < 16)
+        {
+            try
+            {
+                if ((child.Current.Name ?? "").Trim() == "?")
+                    return true;
+            }
+            catch (ElementNotAvailableException)
+            {
+            }
+            try
+            {
+                child = walker.GetNextSibling(child);
+            }
+            catch (ElementNotAvailableException)
+            {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static void PushChildren(TreeWalker walker, Stack<AutomationElement> stack, AutomationElement element)
+    {
+        AutomationElement? child;
+        try
+        {
+            child = walker.GetFirstChild(element);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return;
+        }
+        while (child != null)
+        {
+            stack.Push(child);
+            try
+            {
+                child = walker.GetNextSibling(child);
+            }
+            catch (ElementNotAvailableException)
+            {
+                return;
+            }
+        }
+    }
+
+    public static async Task<IReadOnlyList<FetchedPng>> FetchPngsAsync(HttpClient http, IReadOnlyList<string> urls, CancellationToken cancellationToken)
+    {
+        if (urls.Count == 0)
+            return [];
+        var expression = "(async () => { const urls = " + JsonSerializer.Serialize(urls) + @";
+          const out = [];
+          for (const url of urls) {
+            try {
+              const res = await fetch(new URL(url, location.href).href);
+              if (!res.ok) { out.push({ url, error: String(res.status) }); continue; }
+              const bytes = new Uint8Array(await res.arrayBuffer());
+              if (bytes.length > 700000) { out.push({ url, error: 'large' }); continue; }
+              let binary = '';
+              const chunk = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunk)
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+              out.push({ url, png: btoa(binary) });
+            } catch (e) {
+              out.push({ url, error: String(e && e.message || e) });
+            }
+          }
+          return out;
+        })()";
+        var rows = await ReadJsonAsync<List<FetchedPng>>(http, expression, awaitPromise: true, cancellationToken).ConfigureAwait(false);
+        return rows ?? [];
+    }
+
+    public static async Task<IReadOnlyDictionary<string, byte[]?>> DownloadPngsAsync(HttpClient http, IReadOnlyList<string> urls, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
+        for (var offset = 0; offset < urls.Count; offset += 4)
+        {
+            var batch = urls.Skip(offset).Take(4).ToArray();
+            var jobs = batch.Select(async url =>
+            {
+                try
+                {
+                    var bytes = await http.GetByteArrayAsync(url, cancellationToken).ConfigureAwait(false);
+                    if (bytes.Length < 8 || bytes.Length > 700000 || bytes[0] != 0x89 || bytes[1] != 0x50)
+                        return (url, (byte[]?)null);
+                    return (url, (byte[]?)bytes);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+                {
+                    return (url, (byte[]?)null);
+                }
+            });
+            foreach (var (url, bytes) in await Task.WhenAll(jobs).ConfigureAwait(false))
+                result[url] = bytes;
+        }
+        return result;
+    }
+
+    public static Task RemoveOverlayAsync(HttpClient http, CancellationToken cancellationToken) =>
+        EvaluateValueJsonAsync(http, MinimapOverlay.RemoveScript, awaitPromise: false, ChartBytes, cancellationToken);
+
+    public static Task<string?> InstallOverlayAsync(HttpClient http, string script, CancellationToken cancellationToken) =>
+        EvaluateValueJsonAsync(http, script, awaitPromise: false, ChartBytes, cancellationToken);
+
+    private static async Task<T?> ReadJsonAsync<T>(HttpClient http, string expression, bool awaitPromise, CancellationToken cancellationToken)
+    {
+        var json = await EvaluateValueJsonAsync(http, expression, awaitPromise, ChartBytes, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(json))
+            return default;
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return default;
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+
+    private static async Task<string?> EvaluateValueJsonAsync(HttpClient http, string expression, bool awaitPromise, int maxBytes, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var socket = await FindPageSocketAsync(http, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(socket))
+            {
+                using var web = new ClientWebSocket();
+                await web.ConnectAsync(new Uri(socket), cancellationToken).ConfigureAwait(false);
+                await SendAsync(web, 1, "Runtime.evaluate", new { expression, returnByValue = true, awaitPromise }, null, cancellationToken).ConfigureAwait(false);
+                return ValueJson(await ReceiveAsync(web, 1, cancellationToken, maxBytes).ConfigureAwait(false));
+            }
+
+            foreach (var (port, path) in ActivePorts())
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                var url = $"ws://127.0.0.1:{port}{(path.StartsWith('/') ? path : "/" + path)}";
+                try
+                {
+                    using var web = new ClientWebSocket();
+                    await web.ConnectAsync(new Uri(url), cancellationToken).ConfigureAwait(false);
+                    await SendAsync(web, 1, "Target.getTargets", null, null, cancellationToken).ConfigureAwait(false);
+                    var targetId = FindPlayTarget(await ReceiveAsync(web, 1, cancellationToken).ConfigureAwait(false));
+                    if (targetId == null)
+                        return null;
+                    await SendAsync(web, 2, "Target.attachToTarget", new { targetId, flatten = true }, null, cancellationToken).ConfigureAwait(false);
+                    var sessionId = SessionId(await ReceiveAsync(web, 2, cancellationToken).ConfigureAwait(false));
+                    if (sessionId == null)
+                        continue;
+                    await SendAsync(web, 3, "Runtime.evaluate", new { expression, returnByValue = true, awaitPromise }, sessionId, cancellationToken).ConfigureAwait(false);
+                    return ValueJson(await ReceiveAsync(web, 3, cancellationToken, maxBytes).ConfigureAwait(false));
+                }
+                catch (Exception ex) when (ex is WebSocketException or JsonException or InvalidOperationException or TaskCanceledException)
+                {
+                }
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException)
+        {
+        }
+        return null;
+    }
+
+    private static string? ValueJson(string cdp)
+    {
+        using var doc = JsonDocument.Parse(cdp);
+        if (!doc.RootElement.TryGetProperty("result", out var result))
+            return null;
+        if (result.TryGetProperty("exceptionDetails", out _))
+            return null;
+        if (!result.TryGetProperty("result", out var inner) || !inner.TryGetProperty("value", out var value))
+            return null;
+        return value.GetRawText();
     }
 
     private static int? ReplyId(string json)

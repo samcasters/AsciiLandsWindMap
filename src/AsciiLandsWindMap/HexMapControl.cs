@@ -2,25 +2,39 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace AsciiLandsWindMap;
 
 public readonly record struct PlayerMark(int Q, int R, bool AtSea);
 
+public readonly record struct RouteMark(string RegionId, int EnterSide, int ExitSide, bool Passed, bool Current);
+
 public sealed class HexMapControl : FrameworkElement
 {
+    private const double SheetBudgetPixels = 8_000_000;
     private static readonly Brush ArrowFill = Frozen(Color.FromRgb(20, 22, 24));
     private static readonly Pen ArrowOutline = FrozenPen(Brushes.White, HexSize * 0.035);
     private static readonly Brush MarkBrush = Frozen(Color.FromRgb(233, 168, 37));
     private static readonly Brush FavoriteBrush = Frozen(Color.FromRgb(230, 179, 37));
-    private static readonly Brush LabelBrush = Frozen(Color.FromArgb(77, 255, 255, 255));
-    private static readonly Typeface LabelFace = new("Segoe UI");
+    private static readonly Brush LabelBrush = Frozen(Color.FromArgb(77, 238, 245, 216));
+    private static readonly Brush NorthBrush = Frozen(Color.FromRgb(238, 245, 216));
+    private static readonly Typeface LabelFace = new("Trebuchet MS");
     private static readonly Brush InkBrush = Frozen(Color.FromRgb(42, 24, 18));
     private static readonly Pen InkPen = FrozenPen(InkBrush, 1.5);
     private static readonly Pen DangerInk = FrozenPen(InkBrush, 1.8);
     private static readonly Brush HereBrush = Frozen(Color.FromRgb(242, 107, 58));
     private static readonly Pen HereHalo = RoundPen(InkBrush, 5);
     private static readonly Pen HereStroke = RoundPen(HereBrush, 3);
+    private static readonly Pen PlayerPen = FrozenPen(InkBrush, 1.6);
+    private static readonly Pen SailPen = FrozenPen(HereBrush, 1.2);
+    private static readonly Pen BodyPen = FrozenPen(HereBrush, 1.7);
+    private static readonly Brush DayBorderBrush = Frozen(Color.FromArgb(110, 255, 255, 255));
+    private static readonly Brush NightBorderBrush = Frozen(Color.FromArgb(80, 255, 255, 255));
+    private static readonly Pen DayBorder = FrozenPen(DayBorderBrush, HexSize * 0.045);
+    private static readonly Pen NightBorder = FrozenPen(NightBorderBrush, HexSize * 0.045);
+    private static readonly Pen NorthPen = FrozenPen(NorthBrush, 1.5);
     private static readonly Brush CampBrush = Frozen(Color.FromRgb(106, 148, 78));
     private static readonly Brush HomeBrush = Frozen(Color.FromRgb(196, 112, 74));
     private static readonly Brush PortBrush = Frozen(Color.FromRgb(48, 120, 168));
@@ -29,6 +43,9 @@ public sealed class HexMapControl : FrameworkElement
     private static readonly Brush CacheBrush = Frozen(Color.FromRgb(186, 146, 64));
     private static readonly Brush StarBrush = Frozen(Color.FromRgb(220, 176, 64));
     private static readonly Brush ShopBrush = Frozen(Color.FromRgb(124, 96, 176));
+    private static readonly Brush MapBackground = Frozen(Color.FromRgb(0, 0, 0));
+    private static readonly Color HoverColor = Color.FromArgb(180, 255, 255, 255);
+    private static readonly Color SelectColor = Color.FromRgb(255, 209, 121);
 
     private static SolidColorBrush Frozen(Color color)
     {
@@ -59,18 +76,43 @@ public sealed class HexMapControl : FrameworkElement
     public const double HexSize = 36;
 
     private readonly HexLayout _layout = new(HexSize);
+    private readonly Point[] _corner = new Point[6];
+    private readonly MatrixTransform _cameraTransform = new();
+    private readonly Dictionary<string, List<int>> _biomeBuckets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<int> _visible = new(512);
+    private readonly Dictionary<string, LabelBlock> _labelText = new(StringComparer.Ordinal);
     private List<RegionRow> _regions = [];
+    private Plot[] _plots = [];
     private Dictionary<(int Q, int R), RegionRow> _byCoord = new();
     private Dictionary<string, RegionRow> _byId = new(StringComparer.Ordinal);
     private Dictionary<string, WindSample> _arrows = new(StringComparer.Ordinal);
-    private Drawing? _terrain;
-    private DrawingGroup? _arrowLayer;
+    private Dictionary<string, ImageSource> _pictures = new(StringComparer.Ordinal);
+    private List<RouteMark> _route = [];
     private int? _arrowStamp;
     private bool _arrowDirty;
-    private readonly Dictionary<string, LabelBlock> _labelText = new(StringComparer.Ordinal);
+    private int _contentSerial;
+    private RenderTargetBitmap? _sheet;
+    private double _sheetZoom;
+    private double _sheetLeft;
+    private double _sheetTop;
+    private double _sheetDipW;
+    private double _sheetDipH;
+    private double _sheetWorldW;
+    private double _sheetWorldH;
+    private int _sheetSerial = -1;
+    private bool _sheetLabels;
+    private double _sheetDpiX = double.NaN;
+    private double _sheetDpiY = double.NaN;
+    private bool _deferLabels;
+    private bool _deferSheet;
+    private DispatcherTimer? _labelTimer;
     private double _labelDpi = double.NaN;
-    private DrawingGroup? _markLayer;
-    private int? _markStamp;
+    private FormattedText? _northText;
+    private double _northDpi = double.NaN;
+    private Pen? _hoverPen;
+    private Pen? _selectPen;
+    private double _ringZoom = double.NaN;
+    private bool _labelTimerHooked;
     private bool _night;
     private PlayerMark? _player;
     private bool _opened;
@@ -82,12 +124,17 @@ public sealed class HexMapControl : FrameworkElement
     private Point _down;
     private Point _last;
     private RegionRow? _hover;
-    private SolidColorBrush _mapBackground = Brushes.LightSteelBlue;
+    private bool _painting;
 
     public HexMapControl()
     {
         ClipToBounds = true;
         Focusable = true;
+        for (var i = 0; i < 6; i++)
+        {
+            var angle = Math.PI / 180.0 * (60 * i - 30);
+            _corner[i] = new Point(HexSize * Math.Cos(angle), HexSize * Math.Sin(angle));
+        }
     }
 
     public string? SelectedId { get; private set; }
@@ -103,22 +150,21 @@ public sealed class HexMapControl : FrameworkElement
         _regions = regions.ToList();
         _byCoord = new Dictionary<(int Q, int R), RegionRow>();
         _byId = new Dictionary<string, RegionRow>(StringComparer.Ordinal);
-        foreach (var region in _regions)
+        _plots = new Plot[_regions.Count];
+        for (var i = 0; i < _regions.Count; i++)
         {
+            var region = _regions[i];
             _byId[region.Id] = region;
             _byCoord[(region.Q, region.R)] = region;
+            var (x, y) = _layout.Center(region.Q, region.R);
+            _plots[i] = new Plot(region, x, y);
         }
         _arrows = new Dictionary<string, WindSample>(arrows, StringComparer.Ordinal);
         _night = night;
-        _mapBackground = new SolidColorBrush(night ? Color.FromRgb(14, 20, 27) : Color.FromRgb(213, 224, 230));
-        _mapBackground.Freeze();
         _labelText.Clear();
-        _arrowLayer = null;
         _arrowStamp = null;
         _arrowDirty = false;
-        _markLayer = null;
-        _markStamp = null;
-        RebuildTerrain();
+        _contentSerial++;
         TryOpenWorkView();
         InvalidateVisual();
     }
@@ -127,34 +173,43 @@ public sealed class HexMapControl : FrameworkElement
     {
         var playerMoved = _player != player;
         _player = player;
-        var nightChanged = _terrain == null || _night != night;
+        var nightChanged = _night != night;
         if (nightChanged)
-        {
             _night = night;
-            _mapBackground = new SolidColorBrush(night ? Color.FromRgb(14, 20, 27) : Color.FromRgb(213, 224, 230));
-            _mapBackground.Freeze();
-            if (_regions.Count > 0)
-                RebuildTerrain();
-        }
 
         var stamp = ArrowPicture.HashSamples(_regions, arrows);
-        if (_arrowStamp == stamp && _arrowLayer != null && !_arrowDirty)
+        var arrowsChanged = _arrowStamp != stamp;
+        if (!arrowsChanged && !nightChanged)
         {
-            if (playerMoved || nightChanged)
+            if (playerMoved)
                 InvalidateVisual();
             return;
         }
 
-        _arrows = arrows as Dictionary<string, WindSample> ?? new Dictionary<string, WindSample>(arrows, StringComparer.Ordinal);
-        _arrowStamp = stamp;
-        if (_panning)
+        if (arrowsChanged)
+        {
+            _arrows = arrows as Dictionary<string, WindSample> ?? new Dictionary<string, WindSample>(arrows, StringComparer.Ordinal);
+            _arrowStamp = stamp;
+        }
+
+        if (_panning && !nightChanged)
         {
             _arrowDirty = true;
+            if (playerMoved)
+                InvalidateVisual();
             return;
         }
 
         _arrowDirty = false;
-        RebuildArrowLayer();
+        _contentSerial++;
+        InvalidateVisual();
+    }
+
+    public void SetPlayer(PlayerMark? player)
+    {
+        if (_player == player)
+            return;
+        _player = player;
         InvalidateVisual();
     }
 
@@ -164,11 +219,24 @@ public sealed class HexMapControl : FrameworkElement
         InvalidateVisual();
     }
 
+    public void SetPictures(IReadOnlyDictionary<string, ImageSource> pictures)
+    {
+        _pictures = new Dictionary<string, ImageSource>(pictures, StringComparer.Ordinal);
+        _contentSerial++;
+        InvalidateVisual();
+    }
+
+    public void SetRoute(IReadOnlyList<RouteMark>? marks)
+    {
+        _route = marks == null ? [] : marks.ToList();
+        InvalidateVisual();
+    }
+
     public void NoteChanged()
     {
         _labelText.Clear();
-        _markLayer = null;
-        _markStamp = null;
+        _arrowStamp = ArrowPicture.HashSamples(_regions, _arrows);
+        _contentSerial++;
         InvalidateVisual();
     }
 
@@ -189,13 +257,12 @@ public sealed class HexMapControl : FrameworkElement
             return;
         double minX = double.PositiveInfinity, minY = double.PositiveInfinity;
         double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity;
-        foreach (var region in _regions)
+        foreach (var plot in _plots)
         {
-            var (x, y) = _layout.Center(region.Q, region.R);
-            minX = Math.Min(minX, x);
-            minY = Math.Min(minY, y);
-            maxX = Math.Max(maxX, x);
-            maxY = Math.Max(maxY, y);
+            minX = Math.Min(minX, plot.X);
+            minY = Math.Min(minY, plot.Y);
+            maxX = Math.Max(maxX, plot.X);
+            maxY = Math.Max(maxY, plot.Y);
         }
         minX -= HexSize;
         maxX += HexSize;
@@ -255,8 +322,7 @@ public sealed class HexMapControl : FrameworkElement
         if (_arrowDirty)
         {
             _arrowDirty = false;
-            _arrowStamp = ArrowPicture.HashSamples(_regions, _arrows);
-            RebuildArrowLayer();
+            _contentSerial++;
         }
         if (!_dragged)
         {
@@ -279,6 +345,7 @@ public sealed class HexMapControl : FrameworkElement
             _hover = null;
             HoverChanged?.Invoke(this, null);
             Cursor = Cursors.Arrow;
+            InvalidateVisual();
         }
     }
 
@@ -291,34 +358,269 @@ public sealed class HexMapControl : FrameworkElement
         _camX = world.X - (mouse.X - ActualWidth / 2) / _zoom;
         _camY = world.Y - (mouse.Y - ActualHeight / 2) / _zoom;
         _opened = true;
+        DeferLabels();
         InvalidateVisual();
         e.Handled = true;
     }
 
     protected override void OnRender(DrawingContext dc)
     {
-        dc.DrawRectangle(_mapBackground, null, new Rect(0, 0, ActualWidth, ActualHeight));
-        if (_regions.Count == 0 || ActualWidth < 1 || _zoom <= 0)
+        if (_painting)
+            return;
+        _painting = true;
+        try
+        {
+            dc.DrawRectangle(MapBackground, null, new Rect(0, 0, ActualWidth, ActualHeight));
+            if (_regions.Count == 0 || ActualWidth < 1 || ActualHeight < 1 || _zoom <= 0)
+            {
+                DrawNorth(dc);
+                return;
+            }
+
+            EnsureSheet();
+            DrawSheet(dc);
+
+            var matrix = CameraMatrix();
+            _cameraTransform.Matrix = matrix;
+            dc.PushTransform(_cameraTransform);
+            EnsureRingPens();
+            DrawRoute(dc);
+            DrawRing(dc, _hover, _hoverPen!);
+            DrawRing(dc, SelectedId == null ? null : _byId.GetValueOrDefault(SelectedId), _selectPen!);
+            DrawPlayer(dc);
+            dc.Pop();
+            DrawHere(dc, matrix);
+            DrawNorth(dc);
+        }
+        finally
+        {
+            _painting = false;
+        }
+    }
+
+    private void DeferLabels()
+    {
+        _deferLabels = true;
+        _deferSheet = _sheet != null;
+        _labelTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+        if (!_labelTimerHooked)
+        {
+            _labelTimer.Tick += (_, _) =>
+            {
+                _labelTimer?.Stop();
+                if (!_deferLabels && !_deferSheet)
+                    return;
+                _deferLabels = false;
+                _deferSheet = false;
+                InvalidateVisual();
+            };
+            _labelTimerHooked = true;
+        }
+        _labelTimer.Stop();
+        _labelTimer.Start();
+    }
+
+    private void EnsureSheet()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var scaleX = dpi.DpiScaleX <= 0 ? 1 : dpi.DpiScaleX;
+        var scaleY = dpi.DpiScaleY <= 0 ? 1 : dpi.DpiScaleY;
+        var wantLabels = _zoom >= 0.75 && !_deferLabels;
+        if (_deferSheet && _sheet != null && SheetCovers(NeededWorld()))
+            return;
+        if (_sheet != null
+            && _sheetSerial == _contentSerial
+            && _sheetZoom == _zoom
+            && _sheetLabels == wantLabels
+            && _sheetDpiX == dpi.PixelsPerInchX
+            && _sheetDpiY == dpi.PixelsPerInchY
+            && SheetCovers(NeededWorld()))
             return;
 
-        dc.PushTransform(new MatrixTransform(CameraMatrix()));
-        if (_terrain != null)
-            dc.DrawDrawing(_terrain);
-        if (_zoom >= 0.75 && !_panning)
-            DrawLabels(dc);
-        DrawPlayer(dc);
-        DrawMarks(dc);
-        if (_arrowLayer != null)
-            dc.DrawDrawing(_arrowLayer);
-        DrawRing(dc, _hover, Color.FromArgb(180, 255, 255, 255), 1.4);
-        DrawRing(dc, SelectedId == null ? null : _byId.GetValueOrDefault(SelectedId), Color.FromRgb(230, 179, 37), 2.4);
-        dc.Pop();
-        DrawHere(dc);
+        var viewPx = ActualWidth * scaleX * ActualHeight * scaleY;
+        var span = 2.0;
+        if (viewPx > 0 && viewPx * span * span > SheetBudgetPixels)
+            span = Math.Max(1, Math.Sqrt(SheetBudgetPixels / viewPx));
 
-        var dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        var north = new FormattedText("N", CultureInfo.CurrentCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 13, Brushes.White, dpi);
-        dc.DrawText(north, new Point(18, 8));
-        dc.DrawLine(new Pen(Brushes.White, 1.5), new Point(24, 26), new Point(24, 12));
+        var dipW = ActualWidth * span;
+        var dipH = ActualHeight * span;
+        var pxW = Math.Max(1, (int)Math.Ceiling(dipW * scaleX));
+        var pxH = Math.Max(1, (int)Math.Ceiling(dipH * scaleY));
+        _sheetDipW = pxW / scaleX;
+        _sheetDipH = pxH / scaleY;
+        _sheetWorldW = _sheetDipW / _zoom;
+        _sheetWorldH = _sheetDipH / _zoom;
+        _sheetLeft = _camX - _sheetWorldW / 2;
+        _sheetTop = _camY - _sheetWorldH / 2;
+        _sheetSerial = -1;
+        var pixelsPerDip = dpi.PixelsPerDip;
+        if (pixelsPerDip != _labelDpi)
+        {
+            _labelDpi = pixelsPerDip;
+            _labelText.Clear();
+        }
+
+        var visual = new DrawingVisual();
+        using (var sheet = visual.RenderOpen())
+        {
+            sheet.PushTransform(new MatrixTransform(_zoom, 0, 0, _zoom, -_sheetLeft * _zoom, -_sheetTop * _zoom));
+            PaintWorld(sheet, new Rect(_sheetLeft, _sheetTop, _sheetWorldW, _sheetWorldH), wantLabels, pixelsPerDip);
+            sheet.Pop();
+        }
+
+        var bitmap = new RenderTargetBitmap(pxW, pxH, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        _sheet = bitmap;
+        _sheetZoom = _zoom;
+        _sheetSerial = _contentSerial;
+        _sheetLabels = wantLabels;
+        _sheetDpiX = dpi.PixelsPerInchX;
+        _sheetDpiY = dpi.PixelsPerInchY;
+        _arrowDirty = false;
+    }
+
+    private bool SheetCovers(Rect need) =>
+        _sheetLeft <= need.Left
+        && _sheetTop <= need.Top
+        && _sheetLeft + _sheetWorldW >= need.Right
+        && _sheetTop + _sheetWorldH >= need.Bottom;
+
+    private Rect NeededWorld()
+    {
+        var view = ViewportWorld();
+        var slop = 1.0 / _zoom;
+        if (view.Width <= slop * 2 || view.Height <= slop * 2)
+            return view;
+        view.Inflate(-slop, -slop);
+        return view;
+    }
+
+    private Rect ViewportWorld()
+    {
+        var halfW = ActualWidth / (2 * _zoom);
+        var halfH = ActualHeight / (2 * _zoom);
+        return new Rect(_camX - halfW, _camY - halfH, halfW * 2, halfH * 2);
+    }
+
+    private void DrawSheet(DrawingContext dc)
+    {
+        if (_sheet == null)
+            return;
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var scaleX = dpi.DpiScaleX <= 0 ? 1 : dpi.DpiScaleX;
+        var scaleY = dpi.DpiScaleY <= 0 ? 1 : dpi.DpiScaleY;
+        var x = (_sheetLeft - _camX) * _zoom + ActualWidth / 2;
+        var y = (_sheetTop - _camY) * _zoom + ActualHeight / 2;
+        var w = _sheetWorldW * _zoom;
+        var h = _sheetWorldH * _zoom;
+        if (Math.Abs(w - _sheetDipW) < 0.5 && Math.Abs(h - _sheetDipH) < 0.5)
+        {
+            x = Math.Round(x * scaleX) / scaleX;
+            y = Math.Round(y * scaleY) / scaleY;
+            w = _sheetDipW;
+            h = _sheetDipH;
+        }
+        dc.DrawImage(_sheet, new Rect(x, y, w, h));
+    }
+
+    private void PaintWorld(DrawingContext dc, Rect sheetWorld, bool labels, double pixelsPerDip)
+    {
+        var cull = sheetWorld;
+        cull.Inflate(HexSize, HexSize);
+        _visible.Clear();
+        foreach (var bucket in _biomeBuckets.Values)
+            bucket.Clear();
+
+        for (var i = 0; i < _plots.Length; i++)
+        {
+            var plot = _plots[i];
+            if (plot.X < cull.Left || plot.X > cull.Right || plot.Y < cull.Top || plot.Y > cull.Bottom)
+                continue;
+            _visible.Add(i);
+            var biome = plot.Region.Biome;
+            if (!_biomeBuckets.TryGetValue(biome, out var bucket))
+                _biomeBuckets[biome] = bucket = [];
+            bucket.Add(i);
+        }
+
+        foreach (var (biome, bucket) in _biomeBuckets)
+        {
+            if (bucket.Count == 0)
+                continue;
+            dc.DrawGeometry(BiomePalette.BrushFor(biome, _night), null, OutlineIndexes(bucket));
+        }
+
+        foreach (var index in _visible)
+        {
+            var plot = _plots[index];
+            if (!_pictures.TryGetValue(plot.Region.Id, out var image))
+                continue;
+            var clip = OutlineAt(plot.X, plot.Y);
+            var rect = new Rect(plot.X - HexSize, plot.Y - HexSize, HexSize * 2, HexSize * 2);
+            dc.PushClip(clip);
+            if (_night)
+            {
+                dc.DrawRectangle(BiomePalette.NightLift, null, rect);
+                dc.PushOpacity(BiomePalette.NightKeep);
+                dc.DrawImage(image, rect);
+                dc.Pop();
+            }
+            else
+            {
+                dc.DrawImage(image, rect);
+            }
+            dc.Pop();
+        }
+
+        if (_visible.Count > 0)
+            dc.DrawGeometry(null, _night ? NightBorder : DayBorder, OutlineIndexes(_visible));
+
+        if (labels)
+        {
+            foreach (var index in _visible)
+                DrawLabel(dc, _plots[index], pixelsPerDip);
+        }
+
+        var shafts = new StreamGeometry();
+        using (var ctx = shafts.Open())
+        {
+            foreach (var index in _visible)
+            {
+                var plot = _plots[index];
+                if (!_arrows.TryGetValue(plot.Region.Id, out var sample) || sample.Cancelled || sample.Strength <= 0)
+                    continue;
+                AddArrow(ctx, plot.X, plot.Y, sample.DirectionDeg, WindRules.ArrowLength(sample.Strength, HexSize));
+            }
+        }
+        shafts.Freeze();
+
+        foreach (var index in _visible)
+        {
+            var plot = _plots[index];
+            var icon = TileIcons.Canonical(plot.Region.Icon);
+            if (icon != null)
+            {
+                // South tip is one hex-size below the center. Keep the mark above that point.
+                DrawMark(dc, icon, new Point(plot.X, plot.Y + HexSize * 0.58));
+            }
+        }
+
+        foreach (var index in _visible)
+        {
+            var plot = _plots[index];
+            var region = plot.Region;
+            if (region.Tags.Contains("stormy") || region.Tags.Contains("gale_edge"))
+                DrawDiamond(dc, new Point(plot.X, plot.Y - HexSize * 0.62), HexSize * 0.11, MarkBrush);
+            if (region.Tags.Contains("favorite"))
+            {
+                var hasIcon = TileIcons.Canonical(region.Icon) != null;
+                var favoriteX = hasIcon ? plot.X - HexSize * 0.34 : plot.X;
+                dc.DrawEllipse(FavoriteBrush, null, new Point(favoriteX, plot.Y + HexSize * 0.62), HexSize * 0.07, HexSize * 0.07);
+            }
+        }
+
+        dc.DrawGeometry(ArrowFill, ArrowOutline, shafts);
     }
 
     private void TryOpenWorkView()
@@ -326,79 +628,16 @@ public sealed class HexMapControl : FrameworkElement
         if (_opened || _regions.Count == 0 || ActualWidth < 1 || ActualHeight < 1)
             return;
         double sx = 0, sy = 0;
-        foreach (var region in _regions)
+        foreach (var plot in _plots)
         {
-            var (x, y) = _layout.Center(region.Q, region.R);
-            sx += x;
-            sy += y;
+            sx += plot.X;
+            sy += plot.Y;
         }
         _camX = sx / _regions.Count;
         _camY = sy / _regions.Count;
         _zoom = 0.85;
         _opened = true;
         InvalidateVisual();
-    }
-
-    private void RebuildTerrain()
-    {
-        var group = new DrawingGroup();
-        using (var dc = group.Open())
-        {
-            var byBiome = new Dictionary<string, List<RegionRow>>(StringComparer.OrdinalIgnoreCase);
-            foreach (var region in _regions)
-            {
-                if (!byBiome.TryGetValue(region.Biome, out var list))
-                    byBiome[region.Biome] = list = [];
-                list.Add(region);
-            }
-            foreach (var (biome, list) in byBiome)
-                dc.DrawGeometry(BiomePalette.BrushFor(biome, _night), null, Outline(list));
-            var border = new SolidColorBrush(_night ? Color.FromArgb(80, 255, 255, 255) : Color.FromArgb(110, 255, 255, 255));
-            border.Freeze();
-            dc.DrawGeometry(null, new Pen(border, HexSize * 0.045), Outline(_regions));
-        }
-        group.Freeze();
-        _terrain = group;
-    }
-
-    private void RebuildArrowLayer()
-    {
-        var shafts = new StreamGeometry();
-        using (var ctx = shafts.Open())
-        {
-            foreach (var region in _regions)
-            {
-                if (!_arrows.TryGetValue(region.Id, out var sample) || sample.Cancelled || sample.Strength <= 0)
-                    continue;
-                var (x, y) = _layout.Center(region.Q, region.R);
-                AddArrow(ctx, x, y, sample.DirectionDeg, WindRules.ArrowLength(sample.Strength, HexSize));
-            }
-        }
-        shafts.Freeze();
-
-        var group = new DrawingGroup();
-        using (var dc = group.Open())
-        {
-            foreach (var region in _regions)
-            {
-                var marked = region.Tags.Contains("stormy") || region.Tags.Contains("gale_edge");
-                var favorite = region.Tags.Contains("favorite");
-                if (!marked && !favorite)
-                    continue;
-                var (x, y) = _layout.Center(region.Q, region.R);
-                if (marked)
-                    DrawDiamond(dc, new Point(x, y - HexSize * 0.62), HexSize * 0.11, MarkBrush);
-                if (favorite)
-                {
-                    var hasIcon = TileIcons.Canonical(region.Icon) != null;
-                    var favoriteX = hasIcon ? x - HexSize * 0.34 : x;
-                    dc.DrawEllipse(FavoriteBrush, null, new Point(favoriteX, y + HexSize * 0.62), HexSize * 0.07, HexSize * 0.07);
-                }
-            }
-            dc.DrawGeometry(ArrowFill, ArrowOutline, shafts);
-        }
-        group.Freeze();
-        _arrowLayer = group;
     }
 
     private static void AddArrow(StreamGeometryContext ctx, double x, double y, double degrees, double length)
@@ -440,44 +679,110 @@ public sealed class HexMapControl : FrameworkElement
         dc.DrawGeometry(brush, null, geo);
     }
 
-    private void DrawRing(DrawingContext dc, RegionRow? region, Color color, double screenThickness)
+    private void DrawRoute(DrawingContext dc)
+    {
+        if (_route.Count == 0)
+            return;
+        var bright = RoutePen(Color.FromRgb(238, 245, 216), 2.1);
+        var dim = RoutePen(Color.FromArgb(150, 106, 117, 96), 1.7);
+        var go = RoutePen(Color.FromRgb(157, 228, 108), 2.5);
+        foreach (var mark in _route)
+        {
+            if (!_byId.TryGetValue(mark.RegionId, out var region))
+                continue;
+            var (x, y) = _layout.Center(region.Q, region.R);
+            if (mark.EnterSide >= 0)
+                DrawHand(dc, x, y, mark.EnterSide, mark.Passed || mark.Current ? dim : bright, inward: true);
+            if (mark.ExitSide >= 0)
+            {
+                var pen = mark.Passed ? dim : mark.Current ? go : bright;
+                DrawHand(dc, x, y, mark.ExitSide, pen, inward: false);
+            }
+        }
+    }
+
+    private Pen RoutePen(Color color, double screenPx)
+    {
+        var brush = Frozen(color);
+        var pen = new Pen(brush, Math.Max(screenPx / _zoom, HexSize * 0.03))
+        {
+            StartLineCap = PenLineCap.Round,
+            EndLineCap = PenLineCap.Round,
+            LineJoin = PenLineJoin.Round,
+        };
+        pen.Freeze();
+        return pen;
+    }
+
+    private static void DrawHand(DrawingContext dc, double cx, double cy, int side, Pen pen, bool inward)
+    {
+        var (sx, sy) = Axial.SideVector(side);
+        var reach = HexSize * Math.Sqrt(3) / 2 * 0.92;
+        var end = new Point(cx + sx * reach, cy + sy * reach);
+        dc.DrawLine(pen, new Point(cx, cy), end);
+        var dirX = inward ? -sx : sx;
+        var dirY = inward ? -sy : sy;
+        var tip = inward
+            ? new Point(cx + sx * reach * 0.46, cy + sy * reach * 0.46)
+            : end;
+        var len = HexSize * 0.16;
+        var half = len * 0.55;
+        var back = new Point(tip.X - dirX * len, tip.Y - dirY * len);
+        var px = -dirY;
+        var py = dirX;
+        var geo = new StreamGeometry();
+        using (var ctx = geo.Open())
+        {
+            ctx.BeginFigure(tip, true, true);
+            ctx.LineTo(new Point(back.X + px * half, back.Y + py * half), true, false);
+            ctx.LineTo(new Point(back.X - px * half, back.Y - py * half), true, false);
+        }
+        geo.Freeze();
+        dc.DrawGeometry(pen.Brush, null, geo);
+    }
+
+    private void DrawRing(DrawingContext dc, RegionRow? region, Pen pen)
     {
         if (region == null)
             return;
+        var (x, y) = _layout.Center(region.Q, region.R);
+        dc.DrawGeometry(null, pen, OutlineAt(x, y));
+    }
+
+    private void EnsureRingPens()
+    {
+        if (_hoverPen != null && _selectPen != null && _ringZoom == _zoom)
+            return;
+        _hoverPen = RingPen(HoverColor, 1.4);
+        _selectPen = RingPen(SelectColor, 2.4);
+        _ringZoom = _zoom;
+    }
+
+    private Pen RingPen(Color color, double screenThickness)
+    {
         var brush = new SolidColorBrush(color);
         brush.Freeze();
         var pen = new Pen(brush, Math.Max(screenThickness / _zoom, HexSize * 0.04));
-        dc.DrawGeometry(null, pen, Outline([region]));
+        pen.Freeze();
+        return pen;
     }
 
-    private void DrawLabels(DrawingContext dc)
+    private void DrawLabel(DrawingContext dc, Plot plot, double dpi)
     {
-        var view = VisibleWorld();
-        var dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        if (dpi != _labelDpi)
+        var region = plot.Region;
+        if (!_labelText.TryGetValue(region.Id, out var block))
         {
-            _labelDpi = dpi;
-            _labelText.Clear();
+            var caption = region.Caption.Trim();
+            var name = MakeLabel(region.Name, dpi, caption.Length > 0 ? HexSize * 0.34 : HexSize * 0.55);
+            FormattedText? sub = caption.Length > 0 ? MakeLabel(caption, dpi, HexSize * 0.30) : null;
+            block = new LabelBlock(name, sub);
+            _labelText[region.Id] = block;
         }
-        foreach (var region in _regions)
-        {
-            var (x, y) = _layout.Center(region.Q, region.R);
-            if (!view.Contains(x, y))
-                continue;
-            if (!_labelText.TryGetValue(region.Id, out var block))
-            {
-                var caption = region.Caption.Trim();
-                var name = MakeLabel(region.Name, dpi, caption.Length > 0 ? HexSize * 0.34 : HexSize * 0.55);
-                FormattedText? sub = caption.Length > 0 ? MakeLabel(caption, dpi, HexSize * 0.30) : null;
-                block = new LabelBlock(name, sub);
-                _labelText[region.Id] = block;
-            }
-            var height = block.Name.Height + (block.Caption?.Height ?? 0);
-            var top = y - height / 2;
-            dc.DrawText(block.Name, new Point(x - block.Name.Width / 2, top));
-            if (block.Caption != null)
-                dc.DrawText(block.Caption, new Point(x - block.Caption.Width / 2, top + block.Name.Height));
-        }
+        var height = block.Name.Height + (block.Caption?.Height ?? 0);
+        var top = plot.Y - height / 2;
+        dc.DrawText(block.Name, new Point(plot.X - block.Name.Width / 2, top));
+        if (block.Caption != null)
+            dc.DrawText(block.Caption, new Point(plot.X - block.Caption.Width / 2, top + block.Name.Height));
     }
 
     private static FormattedText MakeLabel(string value, double dpi, double maxHeight) =>
@@ -489,66 +794,33 @@ public sealed class HexMapControl : FrameworkElement
             TextAlignment = TextAlignment.Center,
         };
 
-    private void DrawHere(DrawingContext dc)
+    private void DrawHere(DrawingContext dc, Matrix matrix)
     {
         if (_player is not PlayerMark player || !_byCoord.ContainsKey((player.Q, player.R)))
             return;
-        var matrix = CameraMatrix();
+        var (x, y) = _layout.Center(player.Q, player.R);
         var geo = new StreamGeometry();
         using (var ctx = geo.Open())
         {
-            var (x0, y0) = _layout.Corner(player.Q, player.R, 0);
-            ctx.BeginFigure(matrix.Transform(new Point(x0, y0)), false, true);
+            ctx.BeginFigure(matrix.Transform(new Point(x + _corner[0].X, y + _corner[0].Y)), false, true);
             for (var i = 1; i < 6; i++)
-            {
-                var (x, y) = _layout.Corner(player.Q, player.R, i);
-                ctx.LineTo(matrix.Transform(new Point(x, y)), true, false);
-            }
+                ctx.LineTo(matrix.Transform(new Point(x + _corner[i].X, y + _corner[i].Y)), true, false);
         }
         geo.Freeze();
         dc.DrawGeometry(null, HereHalo, geo);
         dc.DrawGeometry(null, HereStroke, geo);
     }
 
-    private void DrawMarks(DrawingContext dc)
+    private void DrawNorth(DrawingContext dc)
     {
-        var stamp = MarkStamp();
-        if (_markLayer == null || _markStamp != stamp)
+        var dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        if (_northText == null || dpi != _northDpi)
         {
-            _markStamp = stamp;
-            _markLayer = BuildMarks();
+            _northDpi = dpi;
+            _northText = new FormattedText("N", CultureInfo.CurrentCulture, FlowDirection.LeftToRight, LabelFace, 13, NorthBrush, dpi);
         }
-        dc.DrawDrawing(_markLayer);
-    }
-
-    private int MarkStamp()
-    {
-        var hash = new HashCode();
-        foreach (var region in _regions)
-        {
-            hash.Add(region.Id);
-            hash.Add(region.Icon);
-        }
-        return hash.ToHashCode();
-    }
-
-    private DrawingGroup BuildMarks()
-    {
-        var group = new DrawingGroup();
-        using (var dc = group.Open())
-        {
-            foreach (var region in _regions)
-            {
-                var icon = TileIcons.Canonical(region.Icon);
-                if (icon == null)
-                    continue;
-                var (x, y) = _layout.Center(region.Q, region.R);
-                // South tip is one hex-size below the center. Keep the mark above that point.
-                DrawMark(dc, icon, new Point(x, y + HexSize * 0.58));
-            }
-        }
-        group.Freeze();
-        return group;
+        dc.DrawText(_northText, new Point(18, 8));
+        dc.DrawLine(NorthPen, new Point(24, 26), new Point(24, 12));
     }
 
     private static void DrawMark(DrawingContext dc, string icon, Point center)
@@ -572,7 +844,7 @@ public sealed class HexMapControl : FrameworkElement
                 DrawPoly(dc, PortBrush, center, (s * 0.05, s * 0.45), (s * 0.5, s * 0.12), (s * 0.05, s * 0.62));
                 break;
             case "boat":
-                DrawShip(dc, center, BoatBrush, InkPen);
+                DrawShip(dc, center, BoatBrush, InkPen, null);
                 break;
             case "danger":
                 DrawPoly(dc, DangerBrush, center, (0, -s), (s * 0.82, s * 0.72), (-s * 0.82, s * 0.72));
@@ -634,19 +906,13 @@ public sealed class HexMapControl : FrameworkElement
         var (x, y) = _layout.Center(player.Q, player.R);
         // North tip sits one hex-size above the center. Keep the figure below that point.
         var center = new Point(x, y - HexSize * 0.58);
-        var fill = new SolidColorBrush(Color.FromRgb(242, 107, 58));
-        fill.Freeze();
-        var ink = new SolidColorBrush(Color.FromRgb(42, 24, 18));
-        ink.Freeze();
-        var pen = new Pen(ink, 1.6);
-        pen.Freeze();
         if (player.AtSea)
-            DrawShip(dc, center, fill, pen);
+            DrawShip(dc, center, HereBrush, PlayerPen, SailPen);
         else
-            DrawPerson(dc, center, fill, pen);
+            DrawPerson(dc, center, HereBrush, PlayerPen);
     }
 
-    private static void DrawShip(DrawingContext dc, Point center, Brush fill, Pen pen)
+    private static void DrawShip(DrawingContext dc, Point center, Brush fill, Pen pen, Pen? highlight)
     {
         var s = HexSize * 0.16;
         var hull = new StreamGeometry();
@@ -663,18 +929,18 @@ public sealed class HexMapControl : FrameworkElement
         var mastTop = new Point(center.X, center.Y - s * 0.85);
         var mastFoot = new Point(center.X, center.Y + s * 0.15);
         dc.DrawLine(pen, mastFoot, mastTop);
-        dc.DrawLine(new Pen(fill, 1.2), mastFoot, mastTop);
+        highlight ??= new Pen(fill, 1.2);
+        dc.DrawLine(highlight, mastFoot, mastTop);
     }
 
     private static void DrawPerson(DrawingContext dc, Point center, Brush fill, Pen pen)
     {
         var s = HexSize * 0.14;
-        var body = new Pen(fill, 1.7);
         dc.DrawEllipse(fill, pen, new Point(center.X, center.Y - s * 0.85), s * 0.38, s * 0.38);
-        DrawLimb(dc, pen, body, new Point(center.X, center.Y - s * 0.45), new Point(center.X, center.Y + s * 0.35));
-        DrawLimb(dc, pen, body, new Point(center.X - s * 0.55, center.Y - s * 0.05), new Point(center.X + s * 0.55, center.Y - s * 0.05));
-        DrawLimb(dc, pen, body, new Point(center.X, center.Y + s * 0.35), new Point(center.X - s * 0.4, center.Y + s));
-        DrawLimb(dc, pen, body, new Point(center.X, center.Y + s * 0.35), new Point(center.X + s * 0.4, center.Y + s));
+        DrawLimb(dc, pen, BodyPen, new Point(center.X, center.Y - s * 0.45), new Point(center.X, center.Y + s * 0.35));
+        DrawLimb(dc, pen, BodyPen, new Point(center.X - s * 0.55, center.Y - s * 0.05), new Point(center.X + s * 0.55, center.Y - s * 0.05));
+        DrawLimb(dc, pen, BodyPen, new Point(center.X, center.Y + s * 0.35), new Point(center.X - s * 0.4, center.Y + s));
+        DrawLimb(dc, pen, BodyPen, new Point(center.X, center.Y + s * 0.35), new Point(center.X + s * 0.4, center.Y + s));
     }
 
     private static void DrawLimb(DrawingContext dc, Pen outline, Pen body, Point from, Point to)
@@ -683,21 +949,31 @@ public sealed class HexMapControl : FrameworkElement
         dc.DrawLine(body, from, to);
     }
 
-    private StreamGeometry Outline(IReadOnlyList<RegionRow> regions)
+    private StreamGeometry OutlineIndexes(List<int> indexes)
     {
         var geo = new StreamGeometry();
         using (var ctx = geo.Open())
         {
-            foreach (var region in regions)
+            foreach (var index in indexes)
             {
-                var (x0, y0) = _layout.Corner(region.Q, region.R, 0);
-                ctx.BeginFigure(new Point(x0, y0), true, true);
+                var plot = _plots[index];
+                ctx.BeginFigure(new Point(plot.X + _corner[0].X, plot.Y + _corner[0].Y), true, true);
                 for (var i = 1; i < 6; i++)
-                {
-                    var (x, y) = _layout.Corner(region.Q, region.R, i);
-                    ctx.LineTo(new Point(x, y), true, false);
-                }
+                    ctx.LineTo(new Point(plot.X + _corner[i].X, plot.Y + _corner[i].Y), true, false);
             }
+        }
+        geo.Freeze();
+        return geo;
+    }
+
+    private StreamGeometry OutlineAt(double x, double y)
+    {
+        var geo = new StreamGeometry();
+        using (var ctx = geo.Open())
+        {
+            ctx.BeginFigure(new Point(x + _corner[0].X, y + _corner[0].Y), true, true);
+            for (var i = 1; i < 6; i++)
+                ctx.LineTo(new Point(x + _corner[i].X, y + _corner[i].Y), true, false);
         }
         geo.Freeze();
         return geo;
@@ -711,6 +987,7 @@ public sealed class HexMapControl : FrameworkElement
         _hover = region;
         Cursor = region == null ? Cursors.Arrow : Cursors.Hand;
         HoverChanged?.Invoke(this, region);
+        InvalidateVisual();
     }
 
     private RegionRow? Hit(Point screen)
@@ -736,16 +1013,7 @@ public sealed class HexMapControl : FrameworkElement
         return matrix.Transform(screen);
     }
 
-    private Rect VisibleWorld()
-    {
-        var matrix = CameraMatrix();
-        matrix.Invert();
-        var topLeft = matrix.Transform(new Point(0, 0));
-        var bottomRight = matrix.Transform(new Point(ActualWidth, ActualHeight));
-        var rect = new Rect(topLeft, bottomRight);
-        rect.Inflate(HexSize * 2, HexSize * 2);
-        return rect;
-    }
+    private readonly record struct Plot(RegionRow Region, double X, double Y);
 
     private sealed record LabelBlock(FormattedText Name, FormattedText? Caption);
 }

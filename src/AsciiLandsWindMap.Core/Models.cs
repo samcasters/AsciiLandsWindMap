@@ -118,3 +118,13 @@ public sealed class ImportAnalysis
 }
 
 public readonly record struct ImportApplyResult(int Added, int Replaced, int Kept, int Unchanged, int Unknown);
+
+public sealed class TileSurvey
+{
+    public required string RegionId { get; init; }
+    public byte Edges { get; init; }
+    public byte[]? Png { get; init; }
+    public bool OpenSea { get; init; }
+    public ulong Touch { get; init; }
+    public ulong Spans { get; init; }
+}

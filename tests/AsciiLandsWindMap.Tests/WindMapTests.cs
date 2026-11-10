@@ -3,6 +3,42 @@ using Xunit;
 
 namespace AsciiLandsWindMap.Tests;
 
+public class NoticeTests
+{
+    [Fact]
+    public void AcceptanceIsRememberedOnlyAfterAccept()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "windmap-notice-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            Assert.False(NoticeStore.IsAccepted(folder));
+            NoticeStore.Accept(folder);
+            Assert.True(NoticeStore.IsAccepted(folder));
+            Assert.True(File.Exists(Path.Combine(folder, NoticeStore.FileName)));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void NoticeNamesThePlayPageAndLocalStorage()
+    {
+        Assert.Contains("https://asciilands.io/play/", NoticeText.Body, StringComparison.Ordinal);
+        Assert.Contains("wind.sqlite", NoticeText.Body, StringComparison.Ordinal);
+        Assert.Contains("does not upload", NoticeText.Body, StringComparison.Ordinal);
+        Assert.Contains("not shown again", NoticeText.Body, StringComparison.Ordinal);
+        Assert.Contains("decline", NoticeText.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("minimap", NoticeText.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("GPS", NoticeText.Body, StringComparison.Ordinal);
+        Assert.Contains("Update map", NoticeText.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("to the extent the law allows", NoticeText.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("not legal advice", NoticeText.Body, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 public class HexTests
 {
     [Fact]
@@ -238,8 +274,8 @@ public class MapDataTests
         amber = eu.Regions.Single(region => region.Id == "explore-p1-m1");
         Assert.Equal("theirs", amber.Note);
         Assert.Equal(["deep_water"], amber.Tags);
-        Assert.Equal(3, eu.Observations["explore-p1-m1"][0].Strength);
-        Assert.Equal(180, eu.Observations["explore-p1-m1"][0].DirectionDeg, 0);
+        Assert.Equal(2, eu.Observations["explore-p1-m1"][0].Strength);
+        Assert.Equal(90, eu.Observations["explore-p1-m1"][0].DirectionDeg, 0);
         var na = db.Database.LoadMap("na");
         Assert.Equal(1, na.Observations["explore-p1-m1"][0].Strength);
     }
@@ -273,6 +309,7 @@ public class MapDataTests
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("n") + ".json");
         try
         {
+            Assert.Empty(Assert.Single(snapshot.Tiles).Observations);
             MapExchange.Write(path, snapshot);
             var read = MapExchange.Read(path);
             var analysis = db.Database.Analyze(read);
@@ -307,9 +344,7 @@ public class MapDataTests
         Assert.Equal(270, map.SyncWind["explore-p2-p0"].DirectionDeg, 0);
 
         var exported = db.Database.Export("eu", "frontier-v2");
-        var sea = exported.Tiles.Single(tile => tile.Id == "explore-p2-p0");
-        Assert.Contains(sea.Observations, reading => reading.Source == "sync" && reading.Strength == 3);
-        Assert.Contains(sea.Observations, reading => reading.Source == "" && reading.Strength == 2);
+        Assert.Empty(exported.Tiles);
 
         using var other = new TempDb();
         other.Database.ApplyWorld([Node("explore-p2-p0", "Open Sea", "ocean", 2, 0)], "frontier-v2");
@@ -345,8 +380,7 @@ public class MapDataTests
         var loaded = other.Database.LoadMap("eu");
         Assert.Equal(1, loaded.Observations["explore-p2-p0"][0].Strength);
         Assert.Equal(45, loaded.Observations["explore-p2-p0"][0].DirectionDeg, 0);
-        Assert.Equal(3, loaded.SyncWind["explore-p2-p0"].Strength);
-        Assert.Equal(180, loaded.SyncWind["explore-p2-p0"].DirectionDeg, 0);
+        Assert.False(loaded.SyncWind.ContainsKey("explore-p2-p0"));
     }
 
     [Fact]
@@ -537,6 +571,27 @@ public class SeaWindTests
         var rawEdge = SeaWind.WindAt(edge, byCoord, worldMs, 14, true, null);
         Assert.Equal(SeaWind.Mark(rawPlayer.Strength), arrows[player.Id].Strength);
         Assert.Equal(SeaWind.GoingDegrees(rawPlayer.Direction), arrows[player.Id].DirectionDeg, 5);
+        Assert.Equal(SeaWind.Mark(rawEdge.Strength), arrows[edge.Id].Strength);
+        Assert.True(rawEdge.Strength >= SeaWind.GaleFloor);
+    }
+
+    [Fact]
+    public void AChartWithWaterGetsTheSeaArrowAndDryLandDoesNot()
+    {
+        var player = Ocean("explore-p0-p0", 0, 0);
+        var edge = Ocean("explore-p10-p0", 10, 0);
+        var wet = new RegionRow { Id = "explore-p1-p0", Q = 1, R = 0, Name = "River", Biome = "forest" };
+        var dry = new RegionRow { Id = "explore-p2-p0", Q = 2, R = 0, Name = "Dry", Biome = "forest" };
+        var regions = new List<RegionRow> { player, edge, wet, dry };
+        var byCoord = regions.ToDictionary(region => (region.Q, region.R));
+        const double worldMs = 1_700_000_000_000d;
+        var arrows = SeaWind.Oceans(regions, worldMs, 14, player.Id, false, null, new HashSet<string> { wet.Id });
+        Assert.False(arrows.ContainsKey(dry.Id));
+        var wetEdge = Axial.Neighbors(wet.Q, wet.R).Count(hex => byCoord.ContainsKey(hex)) < 6;
+        var rawWet = SeaWind.WindAt(wet, byCoord, worldMs, 14, wetEdge, null);
+        Assert.Equal(SeaWind.Mark(rawWet.Strength), arrows[wet.Id].Strength);
+        Assert.Equal(SeaWind.GoingDegrees(rawWet.Direction), arrows[wet.Id].DirectionDeg, 5);
+        var rawEdge = SeaWind.WindAt(edge, byCoord, worldMs, 14, true, null);
         Assert.Equal(SeaWind.Mark(rawEdge.Strength), arrows[edge.Id].Strength);
         Assert.True(rawEdge.Strength >= SeaWind.GaleFloor);
     }

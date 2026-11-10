@@ -1,26 +1,27 @@
 # Sync
 
-Read the open Asciilands game, show where you are, and fill sea wind from the game's own formula. Region names sit in the middle of each hex at 30% opacity so the arrows stay easy to see.
+Sync reads the open Asciilands game, shows where you are, and fills sea wind from the game's own formula. Region names sit in the middle of each hex at 30% opacity so the arrows stay easy to see.
+
+The first time you open the app, a notice explains this read. Sync does not run until you accept. If you decline, the app closes and does not look at the website. After you accept, the notice stays away, and Sync starts on each time you open the app.
 
 The wiki does not publish the formula. The game client does, in `browserlands/sailing.js` (`windAt`, `breeze`, `windPlace`) and `browserlands/visual-environment.js` (`hourAt`). This app copies that math. It does not invent a different one.
 
 ## Controls
 
-Under the clock:
+**GPS** sits under the clock. **Sync** is on the row below it. After you accept the opening notice, Sync starts on each time the app opens and reads the game every 5 seconds. Turning it off lasts until you turn it on again or open the app.
 
-- A **Sync** toggle. It starts off each time the app opens.
-- A seconds box from 1 to 600 (10 minutes). The number is remembered.
-
-**Sync map** still downloads region names from the wiki.
+**Sync map** still downloads region names from the wiki. **Update map** reads revealed tiles from the game map while that map is open: places you have visited, and places you have been near enough to see. Question-mark tiles stay unread. When the page cannot be scripted, it reads the revealed tiles showing on that map.
 
 ## What a tick does
 
-Sync looks for Edge, Chrome, or Firefox on `https://asciilands.io/play/`. It does not click the page or send keys.
+Sync looks for Edge, Chrome, or Firefox on `https://asciilands.io/play/`. It does not click the page or send keys. While Sync is on it reads the minimap picture of the region you are in. Blue on that picture is water. The picture is saved in `wind.sqlite` and drawn over the wiki color, under the arrows. **Update map** does the same for revealed tiles on the open world map, including tiles you have only been near, and it does not store a tile twice. A scripted page supplies every revealed tile. The screen reader supplies the revealed tiles in view, and places shared names by the hex they sit on. Tiles off that view wait until the map shows them. Question-mark tiles stay unread.
 
-It reads the world clock, the region you are in, facing, and the deep-water wind mark when the game is showing it. Ocean draws a ship on that hex. Any other biome draws a person. The camera stays put.
+It reads the world clock, the region you are in, facing, and the deep-water wind mark when the game is showing it. Ocean draws a ship on that hex. Any other biome draws a person. The camera stays put. The place marker updates on each 5 second read.
 
-Sync reads the time, place, and wind mark shown on the play page. Ocean arrows use the game client's wind formula: the on-screen hour sets the land breeze, and the real clock sets the slow lane and the short gust. The arrows keep moving between reads. A hand reading in the same part of the day still wins.
+Ocean arrows use the game client's wind formula. They are drawn again only when the in-game hour changes, and when you pick Day, Night, or Live. Between those hours the arrows stay still. A tile whose chart shows a river or a shoreline gets that same wind. Dry land draws no arrow.
 
-Calculated wind never overwrites a reading you entered. A hand reading in the current time window wins. Export marks calculated rows as sync. Import never lets those replace a hand reading.
+There is no way to type a wind direction. Export and import share descriptions, notes, marks, and tags. They do not share wind.
 
-Land hexes get no calculated arrow. The route finder is not part of this.
+**GPS** asks for Boat or Walk, then one destination click. Boat sails ocean hexes. Wind is traffic on those crossings: a wind going your way shortens the time, and a wind against you lengthens it. A river is the way from land onto the sea when one continuous stretch of blue crosses from that tile into the next, and from there into the ocean. Separate ponds on one tile stay separate. Walk uses land and rivers and leaves the ocean closed. The route is two lines in each hex, from the center to the side you came from and the side you leave by. Hexes already passed stay drawn, dimmer. Leaving the line draws a new route from the hex you are in.
+
+While that route is active, the minimap shows wind words at the top left, `GPS` at the top right, and the same two lines for the hex you are in. The entry line is darker. When the page can be scripted, those marks are written into `#minimap-svg`. When the page is only visible on screen, the same marks are drawn in a window over the minimap and clicks pass through it. The marks are removed when GPS is cleared, Sync is turned off, or the app closes.
