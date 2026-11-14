@@ -22,6 +22,32 @@ public static class AtlasLabel
         var place = accessibleName[..index].Trim();
         return place.Length == 0 ? null : place;
     }
+
+    /// <summary>
+    /// A name drawn on the world map. The full button label still wins.
+    /// A plain hex name counts too, because the atlas hides that button text until it fits.
+    /// </summary>
+    public static string? MapLabel(string? accessibleName)
+    {
+        var known = PlaceName(accessibleName);
+        if (known != null)
+            return known;
+        if (string.IsNullOrWhiteSpace(accessibleName))
+            return null;
+        var text = accessibleName.Trim();
+        if (text.Length is < 2 or > 48)
+            return null;
+        if (text is "?" or "N" or "M" or "You")
+            return null;
+        if (text.Contains('|') || text.Contains("://", StringComparison.Ordinal) || text.Contains('\n'))
+            return null;
+        if (text.Contains("Loading", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("World graph", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Double-click", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Teleport", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return text;
+    }
 }
 
 public readonly record struct PlacedTile(string Id, string Name, bool OpenSea, string PngUrl);

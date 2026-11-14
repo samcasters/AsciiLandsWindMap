@@ -307,15 +307,16 @@ public static class GameBrowser
                     var speed = TextOf(nodes, "sailing-point");
                     var facing = TextOf(nodes, "ingame-compass-facing");
                     var meta = TextOf(nodes, "zone-meta");
+                    var address = AddressText(window);
                     var nearby = nodes.TryGetValue("minimap-svg", out var minimap)
-                        ? ChildNames(minimap).Where(IsPlaceLabel).ToList()
+                        ? MinimapPlaces(minimap)
                         : [];
                     var glyph = wind.Contains('≋') ? "≋" : wind.Contains('≈') ? "≈" : wind.Contains('~') ? "~" : "";
                     return new GameSnapshot
                     {
                         Found = true,
                         FromScreen = true,
-                        ZoneId = GameHud.ZoneId(meta, title),
+                        ZoneId = GameHud.ZoneId(address, meta, title),
                         Title = title,
                         Meta = meta,
                         Facing = facing,
@@ -336,14 +337,75 @@ public static class GameBrowser
         return null;
     }
 
+    /// <summary>Zone name from the play window. Much shorter than a full sync read.</summary>
+    public static string? PeekZoneTitle()
+    {
+        foreach (var name in new[] { "chrome", "msedge", "firefox" })
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    if (process.MainWindowHandle == IntPtr.Zero)
+                        continue;
+                    var windowTitle = process.MainWindowTitle ?? "";
+                    if (!windowTitle.StartsWith("Asciilands", StringComparison.OrdinalIgnoreCase)
+                        || windowTitle.Contains("Wiki", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var window = AutomationElement.FromHandle(process.MainWindowHandle);
+                    var found = window.FindFirst(
+                        TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.AutomationIdProperty, "zone-title"));
+                    var text = found == null ? "" : SafeName(found);
+                    if (text.Length > 0)
+                        return text;
+                }
+                catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Zone id from the play address, for tiles that share one name.</summary>
+    public static string? PeekZoneId()
+    {
+        foreach (var name in new[] { "chrome", "msedge", "firefox" })
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    if (process.MainWindowHandle == IntPtr.Zero)
+                        continue;
+                    var windowTitle = process.MainWindowTitle ?? "";
+                    if (!windowTitle.StartsWith("Asciilands", StringComparison.OrdinalIgnoreCase)
+                        || windowTitle.Contains("Wiki", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var window = AutomationElement.FromHandle(process.MainWindowHandle);
+                    var zone = GameHud.ZoneId(AddressText(window));
+                    if (!string.IsNullOrEmpty(zone))
+                        return zone;
+                }
+                catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+        }
+        return null;
+    }
+
     private static Dictionary<string, AutomationElement> Index(AutomationElement root)
     {
         var found = new Dictionary<string, AutomationElement>(StringComparer.Ordinal);
         var walker = TreeWalker.RawViewWalker;
         var stack = new Stack<AutomationElement>();
         stack.Push(root);
+        // The zone title and clock sit past the browser chrome. Stopping at 4000
+        // misses them, and the player marker never moves.
         var seen = 0;
-        while (stack.Count > 0 && seen++ < 4000)
+        while (stack.Count > 0 && seen++ < 12000)
         {
             var element = stack.Pop();
             string id;
@@ -435,6 +497,59 @@ public static class GameBrowser
         {
             return "";
         }
+    }
+
+    private static string AddressText(AutomationElement window)
+    {
+        var walker = TreeWalker.ControlViewWalker;
+        var stack = new Stack<AutomationElement>();
+        stack.Push(window);
+        var seen = 0;
+        var candidates = new List<string>();
+        while (stack.Count > 0 && seen++ < 2000)
+        {
+            var element = stack.Pop();
+            try
+            {
+                var name = element.Current.Name ?? "";
+                if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var raw) && raw is ValuePattern value)
+                {
+                    var text = value.Current.Value ?? "";
+                    if (GameHud.ZoneId(text) != null)
+                        return text;
+                    if (text.Contains("asciilands.io", StringComparison.OrdinalIgnoreCase))
+                        candidates.Add(text);
+                }
+                if (GameHud.ZoneId(name) != null)
+                    return name;
+                if (name.Contains("asciilands.io", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(name);
+            }
+            catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException)
+            {
+                continue;
+            }
+            PushChildren(walker, stack, element);
+        }
+        return GameHud.ChooseAddress(candidates);
+    }
+
+    private static List<string> MinimapPlaces(AutomationElement minimap)
+    {
+        var names = new List<string>();
+        var walker = TreeWalker.RawViewWalker;
+        var stack = new Stack<AutomationElement>();
+        stack.Push(minimap);
+        var seen = 0;
+        while (stack.Count > 0 && seen++ < 240)
+        {
+            var element = stack.Pop();
+            var name = SafeName(element);
+            if (IsPlaceLabel(name) && name.Length <= 48 && !names.Contains(name, StringComparer.OrdinalIgnoreCase))
+                names.Add(name);
+            PushChildren(walker, stack, element);
+        }
+        return names;
     }
 
     private static string Knots(string text)
@@ -676,7 +791,7 @@ public static class GameBrowser
                     if (!title.Contains("Asciilands", StringComparison.OrdinalIgnoreCase))
                         continue;
                     var window = AutomationElement.FromHandle(process.MainWindowHandle);
-                    var map = FindById(window, "travel-worldmap", 20000);
+                    var map = FindById(window, "travel-worldmap", 80000);
                     if (map == null)
                     {
                         closed ??= new AtlasScreen { MapOpen = false };
@@ -730,7 +845,7 @@ public static class GameBrowser
         var stack = new Stack<AutomationElement>();
         PushChildren(walker, stack, map);
         var seen = 0;
-        while (stack.Count > 0 && seen++ < 30000)
+        while (stack.Count > 0 && seen++ < 80000)
         {
             var element = stack.Pop();
             string name;
@@ -742,18 +857,12 @@ public static class GameBrowser
             {
                 continue;
             }
-            var place = AtlasLabel.PlaceName(name);
+            var place = AtlasLabel.MapLabel(name);
             if (place != null && !MarkedUnexplored(element))
             {
-                try
-                {
-                    var rect = element.Current.BoundingRectangle;
-                    if (rect.Width > 20 && rect.Height > 20)
-                        raw.Add((place, rect.X + rect.Width / 2, rect.Y + rect.Height / 2, rect.Width, rect.Height));
-                }
-                catch (ElementNotAvailableException)
-                {
-                }
+                var rect = HexRect(element);
+                if (rect is { } box)
+                    raw.Add((place, box.X + box.Width / 2, box.Y + box.Height / 2, box.Width, box.Height));
             }
             PushChildren(walker, stack, element);
         }
@@ -763,11 +872,14 @@ public static class GameBrowser
         var heights = raw.Select(item => item.H).OrderBy(value => value).ToArray();
         var midWidth = widths[widths.Length / 2];
         var midHeight = heights[heights.Length / 2];
+        var uniform = widths[0] > 0 && heights[0] > 0
+            && widths[^1] <= widths[0] * 1.45
+            && heights[^1] <= heights[0] * 1.45;
         var hits = new List<AtlasHit>();
         var occupied = new HashSet<(int X, int Y, string Name)>();
         foreach (var item in raw)
         {
-            if (item.W < midWidth * 0.82 || item.W > midWidth * 1.18 || item.H < midHeight * 0.82 || item.H > midHeight * 1.18)
+            if (uniform && (item.W < midWidth * 0.82 || item.W > midWidth * 1.18 || item.H < midHeight * 0.82 || item.H > midHeight * 1.18))
                 continue;
             var cell = ((int)Math.Round(item.X / 8.0), (int)Math.Round(item.Y / 8.0), item.Name.ToLowerInvariant());
             if (!occupied.Add(cell))
@@ -776,6 +888,54 @@ public static class GameBrowser
         }
         return hits;
     }
+
+    private static System.Windows.Rect? HexRect(AutomationElement element)
+    {
+        var own = SafeRect(element);
+        if (FitsHex(own))
+            return own;
+        var walker = TreeWalker.RawViewWalker;
+        AutomationElement? child;
+        try
+        {
+            child = walker.GetFirstChild(element);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return null;
+        }
+        var count = 0;
+        while (child != null && count++ < 8)
+        {
+            var inner = SafeRect(child);
+            if (FitsHex(inner))
+                return inner;
+            try
+            {
+                child = walker.GetNextSibling(child);
+            }
+            catch (ElementNotAvailableException)
+            {
+                break;
+            }
+        }
+        return null;
+    }
+
+    private static System.Windows.Rect SafeRect(AutomationElement element)
+    {
+        try
+        {
+            return element.Current.BoundingRectangle;
+        }
+        catch (ElementNotAvailableException)
+        {
+            return System.Windows.Rect.Empty;
+        }
+    }
+
+    private static bool FitsHex(System.Windows.Rect rect) =>
+        rect.Width >= 4 && rect.Height >= 4 && rect.Width <= 480 && rect.Height <= 480;
 
     private static bool MarkedUnexplored(AutomationElement element)
     {

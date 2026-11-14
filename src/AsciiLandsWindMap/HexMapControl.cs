@@ -169,7 +169,7 @@ public sealed class HexMapControl : FrameworkElement
         InvalidateVisual();
     }
 
-    public void SetFrame(IReadOnlyDictionary<string, WindSample> arrows, bool night, PlayerMark? player)
+    public void SetFrame(IReadOnlyDictionary<string, WindSample> arrows, bool night, PlayerMark? player, bool exact = false)
     {
         var playerMoved = _player != player;
         _player = player;
@@ -178,7 +178,7 @@ public sealed class HexMapControl : FrameworkElement
             _night = night;
 
         var stamp = ArrowPicture.HashSamples(_regions, arrows);
-        var arrowsChanged = _arrowStamp != stamp;
+        var arrowsChanged = exact || _arrowStamp != stamp;
         if (!arrowsChanged && !nightChanged)
         {
             if (playerMoved)
@@ -557,7 +557,8 @@ public sealed class HexMapControl : FrameworkElement
             if (!_pictures.TryGetValue(plot.Region.Id, out var image))
                 continue;
             var clip = OutlineAt(plot.X, plot.Y);
-            var rect = new Rect(plot.X - HexSize, plot.Y - HexSize, HexSize * 2, HexSize * 2);
+            var side = _layout.PictureSide();
+            var rect = new Rect(plot.X - side / 2, plot.Y - side / 2, side, side);
             dc.PushClip(clip);
             if (_night)
             {

@@ -61,6 +61,16 @@ public class HexTests
     }
 
     [Fact]
+    public void MinimapPictureSeamLandsOnTheSharedEdge()
+    {
+        var layout = new HexLayout(36);
+        var seam = layout.PictureSide() * (HexLayout.PictureSeam / HexLayout.PicturePlayHalf) / 2.0;
+        var origin = layout.Center(0, 0);
+        var east = layout.Center(1, 0);
+        Assert.Equal((east.X - origin.X) / 2.0, seam, 6);
+    }
+
+    [Fact]
     public void EastIsPositiveXAndSouthIsPositiveY()
     {
         var layout = new HexLayout(36);
@@ -695,6 +705,20 @@ public class GameHudTests
     [Fact]
     public void ZoneIdIsLowercased() =>
         Assert.Equal("explore-p21-m10", GameHud.ZoneId("explore-P21-M10 | ocean"));
+
+    [Fact]
+    public void ZoneIdReadsThePlayAddress() =>
+        Assert.Equal("explore-p33-m14", GameHud.ZoneId("https://asciilands.io/play/?zone=explore-p33-m14&account=1"));
+
+    [Fact]
+    public void PlayAddressBeatsTheHostName()
+    {
+        var chosen = GameHud.ChooseAddress([
+            "asciilands.io",
+            "https://asciilands.io/play/?zone=explore-p21-m11&account=1&auth=discord",
+        ]);
+        Assert.Equal("explore-p21-m11", GameHud.ZoneId(chosen));
+    }
 
     [Fact]
     public void WindFromIsTheOppositeOfWhereItIsGoing()

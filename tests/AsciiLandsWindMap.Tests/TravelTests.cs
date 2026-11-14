@@ -185,7 +185,7 @@ public class RouteTests
     }
 
     [Fact]
-    public void BoatOnLandWalksToWaterThenSailsAndStopsAtTheNearestOcean()
+    public void BoatOnLandWalksToWaterThenSailsAndLandsOnTheShore()
     {
         var plan = RouteFinder.Find(
         [
@@ -196,9 +196,84 @@ public class RouteTests
             new("camp", 3, 1, false, 0),
         ], "dry", "camp", TravelMode.Boat, null, id => id);
         Assert.True(plan.Found);
+        Assert.False(plan.WalkRemainder);
+        Assert.Equal("camp", plan.EndId);
+        Assert.Equal(["dry", "shore", "sea", "far", "camp"], plan.Steps.Select(step => step.RegionId));
+        Assert.Equal("Walk to the water, then sail.", plan.Status);
+        Assert.Equal(2, plan.Steps[^1].EnterSide);
+        Assert.Equal(-1, plan.Steps[^1].ExitSide);
+    }
+
+    [Fact]
+    public void BoatToInlandLandStopsOnTheShoreline()
+    {
+        var plan = RouteFinder.Find(
+        [
+            new("sea", -1, 0, true, 0),
+            new("beach", 0, 0, false, 8),
+            new("inland", 1, 0, false, 0),
+        ], "sea", "inland", TravelMode.Boat, null, id => id);
+        Assert.True(plan.Found);
         Assert.True(plan.WalkRemainder);
-        Assert.Equal("far", plan.EndId);
-        Assert.Equal(["dry", "shore", "sea", "far"], plan.Steps.Select(step => step.RegionId));
+        Assert.Equal("beach", plan.EndId);
+        Assert.Equal(["sea", "beach"], plan.Steps.Select(step => step.RegionId));
+        Assert.Equal(3, plan.Steps[^1].EnterSide);
+        Assert.Contains("beach", plan.Status, StringComparison.Ordinal);
+        Assert.Contains("walk you do yourself", plan.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BoatLandsOnTheShorelineInsteadOfACloserOcean()
+    {
+        var plan = RouteFinder.Find(
+        [
+            new("sea", 0, 0, true, 0),
+            new("east", 1, 0, true, 0),
+            new("south", 2, 0, true, 0),
+            new("rise", 2, 1, true, 0),
+            new("near", 2, 2, true, 0),
+            new("beach", 0, 1, false, 4),
+            new("mid", 0, 2, false, 0),
+            new("camp", 0, 3, false, 0),
+        ], "sea", "camp", TravelMode.Boat, null, id => id);
+        Assert.True(plan.Found);
+        Assert.True(plan.WalkRemainder);
+        Assert.Equal("beach", plan.EndId);
+        Assert.Equal(["sea", "beach"], plan.Steps.Select(step => step.RegionId));
+        Assert.DoesNotContain("near", plan.Steps.Select(step => step.RegionId));
+        Assert.Contains("walk you do yourself", plan.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BoatStopsOnTheRiverMouthAndDoesNotSailPastIt()
+    {
+        var plan = RouteFinder.Find(
+        [
+            new("dry", -1, 0, false, 0),
+            new("mouth", 0, 0, false, (byte)(1 | 8)),
+            new("sea", 1, 0, true, 0),
+            new("camp", 0, -1, false, 0),
+        ], "dry", "camp", TravelMode.Boat, null, id => id);
+        Assert.True(plan.Found);
+        Assert.True(plan.WalkRemainder);
+        Assert.Equal("mouth", plan.EndId);
+        Assert.Equal(["dry", "mouth"], plan.Steps.Select(step => step.RegionId));
+        Assert.Contains("mouth", plan.Status, StringComparison.Ordinal);
+        Assert.Contains("walk you do yourself", plan.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BoatFallsBackToTheNearestOceanWhenNoShoreTouchesIt()
+    {
+        var plan = RouteFinder.Find(
+        [
+            new("sea", 0, 0, true, 0),
+            new("camp", 0, 2, false, 0),
+        ], "sea", "camp", TravelMode.Boat, null, id => id);
+        Assert.True(plan.Found);
+        Assert.True(plan.WalkRemainder);
+        Assert.Equal("sea", plan.EndId);
+        Assert.Equal(["sea"], plan.Steps.Select(step => step.RegionId));
         Assert.Contains("walk you do yourself", plan.Status, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -315,19 +390,53 @@ public class RouteTests
 public class OverlayTests
 {
     [Fact]
-    public void OverlayNamesTheWindAndDarkensTheEntryHand()
+    public void OverlayPointsTheWindAndDarkensTheEntryHand()
     {
-        var words = MinimapOverlay.WindWords(new WindSample(90, 3, 1, false));
-        Assert.Contains("strong", words, StringComparison.Ordinal);
-        Assert.Contains("toward E", words, StringComparison.Ordinal);
-        var markup = MinimapOverlay.Markup(words, enterSide: 3, exitSide: 0);
+        var east = MinimapOverlay.Arrow(new WindSample(90, 3, 1, false));
+        var north = MinimapOverlay.Arrow(new WindSample(0, 1, 1, false));
+        var fresh = MinimapOverlay.Arrow(new WindSample(45, 2, 1, false));
+        Assert.True(east.Shown);
+        Assert.True(east.TipX > east.TailX + 10);
+        Assert.InRange(east.TipY, east.TailY - 0.01, east.TailY + 0.01);
+        Assert.True(east.BaseX > east.TailX);
+        Assert.True(east.BaseX < east.TipX);
+        Assert.True(north.TipY < north.TailY - 5);
+        Assert.InRange(north.TipX, north.TailX - 0.01, north.TailX + 0.01);
+        Assert.True(Span(east) > Span(fresh));
+        Assert.True(Span(fresh) > Span(north));
+        Assert.False(MinimapOverlay.Arrow(null).Shown);
+        Assert.False(MinimapOverlay.Arrow(new WindSample(180, 2, 1, true)).Shown);
+        Assert.False(MinimapOverlay.Arrow(new WindSample(180, 0, 1, false)).Shown);
+
+        var markup = MinimapOverlay.Markup(east, enterSide: 3, exitSide: 0);
         Assert.Contains("GPS", markup, StringComparison.Ordinal);
         Assert.Contains("#6a7560", markup, StringComparison.Ordinal);
         Assert.Contains("#eef5d8", markup, StringComparison.Ordinal);
-        Assert.Contains(words, markup, StringComparison.Ordinal);
-        var script = MinimapOverlay.InstallScript(words, 3, 0);
+        Assert.Contains("<polygon", WindGroup(markup), StringComparison.Ordinal);
+        Assert.DoesNotContain("toward", markup, StringComparison.Ordinal);
+        var calm = MinimapOverlay.Markup(WindArrow.Calm, 3, 0);
+        Assert.Contains("<circle", WindGroup(calm), StringComparison.Ordinal);
+        Assert.DoesNotContain("<polygon", WindGroup(calm), StringComparison.Ordinal);
+        var script = MinimapOverlay.InstallScript(east, 3, 0);
         Assert.Contains("minimap-svg", script, StringComparison.Ordinal);
         Assert.Contains(MinimapOverlay.ElementId, MinimapOverlay.RemoveScript, StringComparison.Ordinal);
+    }
+
+    private static double Span(WindArrow arrow)
+    {
+        var dx = arrow.TipX - arrow.TailX;
+        var dy = arrow.TipY - arrow.TailY;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private static string WindGroup(string markup)
+    {
+        var mark = $"id=\"{MinimapOverlay.WindId}\"";
+        var start = markup.IndexOf(mark, StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = markup.IndexOf("</g>", start, StringComparison.Ordinal);
+        Assert.True(end > start);
+        return markup[start..end];
     }
 }
 

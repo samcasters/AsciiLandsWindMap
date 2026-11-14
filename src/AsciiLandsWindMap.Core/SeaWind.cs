@@ -377,6 +377,22 @@ public static partial class GameHud
         return null;
     }
 
+    /// <summary>The omnibox name is often only the host. Prefer the address that still carries the zone.</summary>
+    public static string ChooseAddress(IEnumerable<string?> candidates)
+    {
+        var fallback = "";
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate) || candidate.IndexOf("asciilands.io", StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            if (ZoneId(candidate) != null)
+                return candidate;
+            if (fallback.Length == 0)
+                fallback = candidate;
+        }
+        return fallback;
+    }
+
     public static bool TryWindFrom(string? label, string? glyph, out double goingDegrees, out int strength)
     {
         goingDegrees = 0;

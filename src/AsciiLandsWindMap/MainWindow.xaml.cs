@@ -40,6 +40,8 @@ public partial class MainWindow : Window
     private int _seaPicture = int.MinValue;
     private int _seaMinute = -1;
     private int _arrowHour = int.MinValue;
+    private DateTime _arrowsAt = DateTime.MinValue;
+    private static readonly TimeSpan ArrowRefresh = TimeSpan.FromSeconds(15);
     private WindWindow? _drawnWindow;
     private bool _drawnNight;
     private object? _drawnSync;
@@ -53,6 +55,8 @@ public partial class MainWindow : Window
     private string? _gpsDestinationId;
     private RoutePlan? _gpsPlan;
     private bool _gpsPicking;
+    private bool _gpsBusy;
+    private int _placeEpoch;
     private bool _overlayBusy;
     private bool _overlayOnPage;
     private bool _closing;
@@ -152,7 +156,7 @@ public partial class MainWindow : Window
             _arrows = new Dictionary<string, WindSample>(StringComparer.Ordinal);
             _drawnWindow = null;
             _drawnSync = null;
-            Map.SetFrame(_arrows, false, _player);
+            Map.SetFrame(_arrows, false, _player, exact: true);
             return;
         }
 
@@ -175,7 +179,7 @@ public partial class MainWindow : Window
                 continue;
             _arrows[id] = new WindSample(sync.DirectionDeg, sync.Strength, 1, false);
         }
-        Map.SetFrame(_arrows, night, _player);
+        Map.SetFrame(_arrows, night, _player, exact: true);
         Tile.UpdateShown(_viewMinute, Tile.RegionId is string shownId ? ArrowFor(shownId) : null);
     }
 
@@ -199,6 +203,7 @@ public partial class MainWindow : Window
     private void TickClock()
     {
         MaybeOverlay();
+        MaybeGpsZone();
         if (_mode != MapMode.Live)
             return;
         if (GameSyncButton.IsChecked == true && _serverClock is ServerClock clock)
@@ -249,15 +254,13 @@ public partial class MainWindow : Window
             Tile.UpdateMapTime(_viewMinute);
         }
 
-        if (SeaWind.HourIndex(hour) == _arrowHour)
-            return;
         var elapsed = Math.Max(0, (DateTime.UtcNow - clock.ReadUtc).TotalMilliseconds);
         PublishSea(clock.ServerTimeMs + elapsed, hour, minute, remember: true, force: false);
     }
 
     private void DriftFormula(double hour)
     {
-        if (_regions.Count == 0 || SeaWind.HourIndex(hour) == _arrowHour)
+        if (_regions.Count == 0)
             return;
         var minute = SeaWind.MinuteOf(hour);
         PublishSea(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), hour, minute, remember: true, force: false);
@@ -287,12 +290,15 @@ public partial class MainWindow : Window
         if (_regions.Count == 0)
             return;
         var bucket = SeaWind.HourIndex(hour);
-        if (!force && bucket == _arrowHour)
+        var now = DateTime.UtcNow;
+        if (!force && bucket == _arrowHour && now - _arrowsAt < ArrowRefresh)
             return;
+        var hourChanged = bucket != _arrowHour;
         _arrowHour = bucket;
+        _arrowsAt = now;
         _seaScratch.Clear();
         Field().Fill(_seaScratch, worldMs, hour, _trackedZone, _trackedEdge, _trackedWeather);
-        if (remember)
+        if (remember && (force || hourChanged))
             RememberSea(minute, _seaScratch);
         ApplySea(_seaScratch, minute, force: true, refresh: true);
     }
@@ -544,6 +550,20 @@ public partial class MainWindow : Window
         notice.ShowDialog();
     }
 
+    private void CreditsClick(object sender, RoutedEventArgs e)
+    {
+        var credits = new CreditsWindow { Owner = this };
+        credits.ShowDialog();
+    }
+
+    private void ToggleInfoClick(object sender, RoutedEventArgs e)
+    {
+        var open = InfoOpen.Visibility != Visibility.Visible;
+        InfoOpen.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        InfoClosed.Visibility = open ? Visibility.Collapsed : Visibility.Visible;
+        InfoColumn.Width = open ? new GridLength(360) : GridLength.Auto;
+    }
+
     private void ExportClick(object sender, RoutedEventArgs e)
     {
         var snapshot = _database.Export(_realm, _worldId);
@@ -655,16 +675,19 @@ public partial class MainWindow : Window
             return;
         _gameBusy = true;
         var version = _gameVersion;
+        var placeEpoch = _placeEpoch;
         try
         {
             using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             var game = await GameBrowser.ReadAsync(_debugHttp, cancel.Token);
             if (version != _gameVersion || GameSyncButton.IsChecked != true)
                 return;
-            ApplyGame(game);
+            ApplyGame(game, keepPlace: placeEpoch != _placeEpoch);
             if (!game.FromScreen && game.Detail is "ok" or "no-clock" or "visible")
                 await ReadStandingChartAsync();
             FollowGps();
+            if (OverlayWanted())
+                _ = RefreshOverlayAsync();
         }
         catch (Exception)
         {
@@ -677,7 +700,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyGame(GameSnapshot game)
+    private void ApplyGame(GameSnapshot game, bool keepPlace = false)
     {
         if (game.Detail == "missing")
         {
@@ -701,27 +724,34 @@ public partial class MainWindow : Window
             return;
         }
 
-        var zoneId = game.ZoneId;
-        if (string.IsNullOrEmpty(zoneId))
-            zoneId = RegionMatch.Find(_regions, game.Title, game.NearbyNames);
-
-        var place = game.Title.Trim();
+        string? zoneId;
+        string place;
         var unknown = false;
-        if (!string.IsNullOrEmpty(zoneId))
+        if (keepPlace && !string.IsNullOrEmpty(_playerZone))
         {
-            if (_byId.TryGetValue(zoneId, out var region))
+            zoneId = _playerZone;
+            place = _byId.TryGetValue(_playerZone, out var stayed) ? stayed.Name : game.Title.Trim();
+        }
+        else
+        {
+            zoneId = ZoneFor(game.Title, game.NearbyNames, game.ZoneId);
+            place = game.Title.Trim();
+            if (!string.IsNullOrEmpty(zoneId))
             {
-                place = region.Name;
-                _player = new PlayerMark(region.Q, region.R, region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase));
-                _playerZone = region.Id;
-            }
-            else
-            {
-                _player = null;
-                _playerZone = null;
-                unknown = true;
-                if (place.Length == 0)
-                    place = zoneId;
+                if (_byId.TryGetValue(zoneId, out var region))
+                {
+                    place = region.Name;
+                    _player = new PlayerMark(region.Q, region.R, region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase));
+                    _playerZone = region.Id;
+                }
+                else
+                {
+                    _player = null;
+                    _playerZone = null;
+                    unknown = true;
+                    if (place.Length == 0)
+                        place = zoneId;
+                }
             }
         }
 
@@ -743,7 +773,7 @@ public partial class MainWindow : Window
             _formulaHour = null;
             var elapsed = Math.Max(0, (DateTime.UtcNow - clock.ReadUtc).TotalMilliseconds);
             PublishSea(clock.ServerTimeMs + elapsed, hour, minute.Value, remember: true, force: false);
-            seaNote = $"Sea wind is held for this in-game hour on {_seaScratch.Count} ocean tiles.";
+            seaNote = $"Sea wind refreshes every 15 seconds on {_seaScratch.Count} tiles.";
             if (windRead && !string.IsNullOrEmpty(zoneId) && _seaScratch.TryGetValue(zoneId, out var calculated))
             {
                 var liveFrom = CompassText.Point(liveGoing + 180);
@@ -799,7 +829,7 @@ public partial class MainWindow : Window
         _trackedWeather = null;
         var worldMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         PublishSea(worldMs, hour, minute, remember: true, force: false);
-        var note = $"Sea wind is held for this in-game hour on {_seaScratch.Count} ocean tiles.";
+        var note = $"Sea wind refreshes every 15 seconds on {_seaScratch.Count} tiles.";
         if (!windRead || string.IsNullOrEmpty(zoneId) || !_byId.TryGetValue(zoneId, out var standing))
             return (note, null);
 
@@ -1252,6 +1282,58 @@ public partial class MainWindow : Window
         return RouteFinder.Find(hexes, start, destinationId, mode, wind, id => _byId.TryGetValue(id, out var region) ? region.Name : id);
     }
 
+    private string? ZoneFor(string? title, IReadOnlyList<string>? nearby, string? addressed)
+    {
+        var named = RegionMatch.Find(_regions, title, nearby);
+        if (!string.IsNullOrEmpty(named))
+            return named;
+        return string.IsNullOrEmpty(addressed) ? null : addressed;
+    }
+
+    private void MaybeGpsZone()
+    {
+        if (_closing || _gpsBusy)
+            return;
+        if (_gpsPlan is not { Found: true } || GameSyncButton.IsChecked != true)
+            return;
+        _ = PeekGpsZoneAsync();
+    }
+
+    private async Task PeekGpsZoneAsync()
+    {
+        if (_closing || _gpsBusy)
+            return;
+        if (_gpsPlan is not { Found: true } || GameSyncButton.IsChecked != true)
+            return;
+        _gpsBusy = true;
+        try
+        {
+            var title = await Task.Run(GameBrowser.PeekZoneTitle);
+            if (_closing)
+                return;
+            var zone = ZoneFor(title, null, null);
+            if (string.IsNullOrEmpty(zone))
+            {
+                zone = await Task.Run(GameBrowser.PeekZoneId);
+                if (_closing)
+                    return;
+            }
+            if (string.IsNullOrEmpty(zone) || zone == _playerZone || !_byId.TryGetValue(zone, out var region))
+                return;
+            _placeEpoch++;
+            _player = new PlayerMark(region.Q, region.R, region.Biome.Equals("ocean", StringComparison.OrdinalIgnoreCase));
+            _playerZone = region.Id;
+            Map.SetPlayer(_player);
+            FollowGps();
+            if (OverlayWanted())
+                _ = RefreshOverlayAsync();
+        }
+        finally
+        {
+            _gpsBusy = false;
+        }
+    }
+
     private void FollowGps()
     {
         if (_gpsPlan == null || _gpsPlan.Steps.Count == 0 || _gpsMode == null || _gpsDestinationId == null || _playerZone == null)
@@ -1301,7 +1383,7 @@ public partial class MainWindow : Window
     {
         if (_closing || _overlayBusy)
             return;
-        if (_gpsPlan == null || !_gpsPlan.Found || GameSyncButton.IsChecked != true)
+        if (!OverlayWanted())
         {
             if (_overlayOnPage || _float is { IsVisible: true })
                 _ = ClearOverlayAsync();
@@ -1320,40 +1402,49 @@ public partial class MainWindow : Window
         _overlayAt = DateTime.UtcNow;
         try
         {
-            var step = CurrentStep();
-            var sample = _playerZone != null && _arrows.TryGetValue(_playerZone, out var arrow) ? arrow : (WindSample?)null;
-            var words = MinimapOverlay.WindWords(sample);
-            var enter = step.EnterSide;
-            var exit = step.ExitSide;
-            var onPage = false;
-            try
+            for (var pass = 0; pass < 2 && OverlayWanted(); pass++)
             {
-                var script = MinimapOverlay.InstallScript(words, enter, exit);
-                using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                var json = await GameBrowser.InstallOverlayAsync(_debugHttp, script, cancel.Token);
-                onPage = json != null && json.Contains("true", StringComparison.Ordinal);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException)
-            {
-                onPage = false;
-            }
-            if (!OverlayWanted())
-                return;
-            if (onPage)
-            {
-                _overlayOnPage = true;
-                HideFloat();
-                return;
-            }
+                var drawnZone = _playerZone;
+                var step = CurrentStep();
+                var sample = drawnZone != null && _arrows.TryGetValue(drawnZone, out var reading) ? reading : (WindSample?)null;
+                var arrow = MinimapOverlay.Arrow(sample);
+                var enter = step.EnterSide;
+                var exit = step.ExitSide;
+                var onPage = false;
+                try
+                {
+                    var script = MinimapOverlay.InstallScript(arrow, enter, exit);
+                    using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+                    var json = await GameBrowser.InstallOverlayAsync(_debugHttp, script, cancel.Token);
+                    onPage = json != null && json.Contains("true", StringComparison.Ordinal);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or WebSocketException or JsonException or InvalidOperationException or TaskCanceledException or IOException)
+                {
+                    onPage = false;
+                }
+                if (!OverlayWanted())
+                    return;
+                if (onPage)
+                {
+                    _overlayOnPage = true;
+                    HideFloat();
+                    if (_playerZone == drawnZone)
+                        return;
+                    continue;
+                }
 
-            var box = await Task.Run(GameBrowser.MinimapBox);
-            if (!OverlayWanted())
+                var box = await Task.Run(GameBrowser.MinimapBox);
+                if (!OverlayWanted())
+                    return;
+                _overlayOnPage = false;
+                if (_playerZone != drawnZone)
+                    continue;
+                if (box is GameBrowser.ScreenBox place)
+                    ShowFloat(place, arrow, enter, exit);
+                else
+                    HideFloat();
                 return;
-            _overlayOnPage = false;
-            if (box is GameBrowser.ScreenBox place)
-                ShowFloat(place, words, enter, exit);
-            else
-                HideFloat();
+            }
         }
         finally
         {
@@ -1364,10 +1455,10 @@ public partial class MainWindow : Window
     private bool OverlayWanted() =>
         !_closing && _gpsPlan is { Found: true } && GameSyncButton.IsChecked == true;
 
-    private void ShowFloat(GameBrowser.ScreenBox box, string wind, int enter, int exit)
+    private void ShowFloat(GameBrowser.ScreenBox box, WindArrow arrow, int enter, int exit)
     {
         _float ??= new MinimapFloat();
-        _float.ShowOver(this, box.X, box.Y, box.Width, box.Height, wind, enter, exit);
+        _float.ShowOver(this, box.X, box.Y, box.Width, box.Height, arrow, enter, exit);
     }
 
     private void HideFloat()

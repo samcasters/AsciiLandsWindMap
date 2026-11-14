@@ -44,6 +44,7 @@
         <Button Content="Export" Margin="4,2" Click="ExportClick"/>
         <Button Content="Import" Margin="4,2" Click="ImportClick"/>
         <Button Content="Notice" Margin="4,2" Click="NoticeClick" ToolTip="Read the notice about what this app reads"/>
+        <Button Content="Credits" Margin="4,2" Click="CreditsClick" ToolTip="Who made this map"/>
       </WrapPanel>
     </Border>
 
@@ -58,24 +59,25 @@
     <Grid Grid.Row="2">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="360"/>
+        <ColumnDefinition x:Name="InfoColumn" Width="360"/>
       </Grid.ColumnDefinitions>
       <Grid Grid.Column="0">
         <local:HexMapControl x:Name="Map" PreviewMouseLeftButtonDown="MapPreviewDown"/>
         <TextBlock x:Name="EmptyText" Text="Downloading the Asciilands map…" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" IsHitTestVisible="False"/>
-        <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="12" Padding="12,8"
-                Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" IsHitTestVisible="False">
-          <StackPanel>
-            <TextBlock FontWeight="SemiBold" Text="Wind arrows"/>
-            <TextBlock Margin="0,2,0,0" Text="~ light     ≈ fresh     ≋ strong"/>
-            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="The arrow points where the wind is going."/>
-            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Gold dot: favorite. Amber diamond: storm or gale."/>
-            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="Coral outline: the hex you are in."/>
-            <TextBlock Foreground="{DynamicResource MutedBrush}" Text="A chart on a hex is the game's own tile. The pale line is the GPS route."/>
-          </StackPanel>
-        </Border>
       </Grid>
-      <local:TilePanel x:Name="Tile" Grid.Column="1"/>
+      <Border x:Name="InfoOpen" Grid.Column="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1,0,0,0">
+        <DockPanel>
+          <Button DockPanel.Dock="Top" Content="Hide" Margin="14,10,14,0" Padding="10,4" HorizontalAlignment="Left" Click="ToggleInfoClick" ToolTip="Hide the wind map panel"/>
+          <local:TilePanel x:Name="Tile"/>
+        </DockPanel>
+      </Border>
+      <Button x:Name="InfoClosed" Grid.Column="1" Visibility="Collapsed" VerticalAlignment="Center" HorizontalAlignment="Right" Padding="8,14" Click="ToggleInfoClick" ToolTip="Show the wind map panel">
+        <TextBlock Text="Wind map">
+          <TextBlock.LayoutTransform>
+            <RotateTransform Angle="-90"/>
+          </TextBlock.LayoutTransform>
+        </TextBlock>
+      </Button>
     </Grid>
 
     <Border Grid.Row="3" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0" Padding="10,6">

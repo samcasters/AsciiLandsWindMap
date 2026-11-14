@@ -29,8 +29,11 @@ public sealed class MinimapFloat : Window
     private static readonly Brush EntryBrush = Freeze(Color.FromRgb(0x6a, 0x75, 0x60));
     private static readonly Brush ExitBrush = Freeze(Color.FromRgb(0xee, 0xf5, 0xd8));
     private static readonly Pen OutlinePen = FreezePen(Color.FromRgb(0x17, 0x25, 0x1a), 2.4);
+    private static readonly Pen HeadPen = FreezePen(Color.FromRgb(0x17, 0x25, 0x1a), 1.2);
+    private static readonly Pen CalmOutline = FreezePen(Color.FromRgb(0x17, 0x25, 0x1a), 3.6);
+    private static readonly Pen CalmInk = FreezePen(Color.FromRgb(0xee, 0xf5, 0xd8), 1.8);
 
-    private string _wind = "No wind arrow";
+    private WindArrow _arrow = WindArrow.Calm;
     private int _enter = -1;
     private int _exit = -1;
     private int _x;
@@ -54,9 +57,9 @@ public sealed class MinimapFloat : Window
         SourceInitialized += OnSourceInitialized;
     }
 
-    public void ShowOver(Window owner, double x, double y, double width, double height, string wind, int enter, int exit)
+    public void ShowOver(Window owner, double x, double y, double width, double height, WindArrow arrow, int enter, int exit)
     {
-        _wind = wind;
+        _arrow = arrow;
         _enter = enter;
         _exit = exit;
         _x = (int)Math.Round(x);
@@ -117,12 +120,49 @@ public sealed class MinimapFloat : Window
         var scale = Math.Min(width, height) / 240.0;
         dc.PushTransform(new TranslateTransform((width - 240 * scale) / 2, (height - 240 * scale) / 2));
         dc.PushTransform(new ScaleTransform(scale, scale));
-        DrawLabel(dc, _wind, 8, 16, WindBrush, end: false);
+        DrawWind(dc, _arrow);
         DrawLabel(dc, "GPS", 232, 16, GpsBrush, end: true);
         DrawHand(dc, _enter, EntryBrush, inward: true);
         DrawHand(dc, _exit, ExitBrush, inward: false);
         dc.Pop();
         dc.Pop();
+    }
+
+    private static void DrawWind(DrawingContext dc, WindArrow arrow)
+    {
+        if (!arrow.Shown)
+        {
+            var ring = new Point(MinimapOverlay.CenterX, MinimapOverlay.CenterY);
+            dc.DrawEllipse(null, CalmOutline, ring, 5, 5);
+            dc.DrawEllipse(null, CalmInk, ring, 5, 5);
+            return;
+        }
+
+        var outline = new Pen(Freeze(Color.FromRgb(0x17, 0x25, 0x1a)), 5)
+        {
+            StartLineCap = PenLineCap.Round,
+            EndLineCap = PenLineCap.Round,
+        };
+        var shaft = new Pen(WindBrush, 2.4)
+        {
+            StartLineCap = PenLineCap.Round,
+            EndLineCap = PenLineCap.Round,
+        };
+        outline.Freeze();
+        shaft.Freeze();
+        var tail = new Point(arrow.TailX, arrow.TailY);
+        var neck = new Point(arrow.BaseX, arrow.BaseY);
+        dc.DrawLine(outline, tail, neck);
+        dc.DrawLine(shaft, tail, neck);
+        var head = new StreamGeometry();
+        using (var ctx = head.Open())
+        {
+            ctx.BeginFigure(new Point(arrow.TipX, arrow.TipY), true, true);
+            ctx.LineTo(new Point(arrow.LeftX, arrow.LeftY), true, false);
+            ctx.LineTo(new Point(arrow.RightX, arrow.RightY), true, false);
+        }
+        head.Freeze();
+        dc.DrawGeometry(WindBrush, HeadPen, head);
     }
 
     private void DrawLabel(DrawingContext dc, string text, double x, double baseline, Brush fill, bool end)

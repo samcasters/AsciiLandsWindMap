@@ -153,6 +153,13 @@ public static class RouteFinder
         Func<string, string>? nameOf)
     {
         var dest = byId[destinationId];
+        if (!dest.Ocean)
+        {
+            var ashore = LandOnShore(byId, byCoord, start, dest, destinationId, wind, nameOf);
+            if (ashore != null)
+                return ashore;
+        }
+
         var oceans = new List<RouteHex>();
         foreach (var hex in byId.Values)
         {
@@ -168,26 +175,151 @@ public static class RouteFinder
 
         foreach (var target in targets)
         {
-            var reach = Reach(target.Id, byId, byCoord, wind);
-            if (!reach.Contains(new SailNode(target.Id, 0)))
+            if (!TrySail(start, target.Id, byId, byCoord, wind, reach: null, out var ids))
                 continue;
-            if (!TryBoard(start, target.Id, reach, byId, byCoord, wind, out var ids))
-                continue;
-
-            var endName = nameOf?.Invoke(target.Id) ?? target.Id;
-            var walked = ids.Count > 0 && ids[0] == start.Id && !IsWater(start) && ids.Any(id => id != start.Id);
-            var status = dest.Ocean
-                ? walked ? "Walk to the water, then sail." : "Boat route."
-                : walked
-                    ? $"Walk to the water, then sail. The sail ends at {endName}. The rest is a walk you do yourself."
-                    : $"The sail ends at {endName}. The rest is a walk you do yourself.";
-            if (dest.Ocean && !walked)
-                status = "Boat route.";
-            return Finish(TravelMode.Boat, destinationId, target.Id, ids, byId, byCoord, wind, status, walkRemainder: !dest.Ocean);
+            return FinishBoat(start, destinationId, target.Id, ids, byId, byCoord, wind, nameOf, endsAtDestination: dest.Ocean);
         }
 
         return RoutePlan.None(TravelMode.Boat, destinationId,
             "No water on the map connects your hex to that destination.");
+    }
+
+    /// <summary>
+    /// A shoreline is a land hex that shares a side with the ocean and sits on the destination's
+    /// land, so the walk from that beach to the destination never crosses ocean. The closest one
+    /// is the shortest of those walks. The sail stops there: one step onto the beach, and no farther inland.
+    /// </summary>
+    private static RoutePlan? LandOnShore(
+        Dictionary<string, RouteHex> byId,
+        Dictionary<(int Q, int R), RouteHex> byCoord,
+        RouteHex start,
+        RouteHex dest,
+        string destinationId,
+        IReadOnlyDictionary<string, WindAt>? wind,
+        Func<string, string>? nameOf)
+    {
+        var land = WalkParents(dest.Id, byId, byCoord);
+        var shores = new List<(RouteHex Shore, int Walk)>();
+        foreach (var hex in byId.Values)
+        {
+            if (hex.Ocean || !land.ContainsKey(hex.Id) || !TouchesOcean(hex, byCoord))
+                continue;
+            shores.Add((hex, WalkLength(land, hex.Id)));
+        }
+
+        shores.Sort((a, b) =>
+        {
+            var walk = a.Walk.CompareTo(b.Walk);
+            return walk != 0 ? walk : string.Compare(a.Shore.Id, b.Shore.Id, StringComparison.Ordinal);
+        });
+
+        var reachOf = new Dictionary<string, HashSet<SailNode>>(StringComparer.Ordinal);
+        foreach (var (shore, _) in shores)
+        {
+            if (shore.Id == start.Id)
+                return FinishBoat(start, destinationId, shore.Id, [start.Id], byId, byCoord, wind, nameOf, endsAtDestination: false);
+
+            foreach (var ocean in OceanNeighbors(shore, byCoord))
+            {
+                if (!reachOf.TryGetValue(ocean.Id, out var reach))
+                {
+                    reach = Reach(ocean.Id, byId, byCoord, wind);
+                    reachOf[ocean.Id] = reach;
+                }
+
+                if (!TrySail(start, ocean.Id, byId, byCoord, wind, reach, out var ids))
+                    continue;
+                StopAtShore(ids, ocean.Id, shore.Id);
+                if (ids.Count == 0 || ids[^1] != shore.Id)
+                    continue;
+                return FinishBoat(start, destinationId, shore.Id, ids, byId, byCoord, wind, nameOf, endsAtDestination: shore.Id == destinationId);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TouchesOcean(RouteHex hex, Dictionary<(int Q, int R), RouteHex> byCoord)
+    {
+        for (var side = 0; side < 6; side++)
+        {
+            var (dq, dr) = Axial.NeighborDeltas[side];
+            if (byCoord.TryGetValue((hex.Q + dq, hex.R + dr), out var next) && next.Ocean)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Ocean hexes that share a side with this shore. A charted mouth comes before a dry side.</summary>
+    private static List<RouteHex> OceanNeighbors(RouteHex shore, Dictionary<(int Q, int R), RouteHex> byCoord)
+    {
+        var found = new List<(RouteHex Ocean, bool Charted)>();
+        for (var side = 0; side < 6; side++)
+        {
+            var (dq, dr) = Axial.NeighborDeltas[side];
+            if (!byCoord.TryGetValue((shore.Q + dq, shore.R + dr), out var next) || !next.Ocean)
+                continue;
+            found.Add((next, shore.Meets(side, next)));
+        }
+
+        return found
+            .OrderByDescending(item => item.Charted)
+            .ThenBy(item => item.Ocean.Id, StringComparer.Ordinal)
+            .Select(item => item.Ocean)
+            .ToList();
+    }
+
+    private static void StopAtShore(List<string> ids, string oceanId, string shoreId)
+    {
+        var at = ids.IndexOf(shoreId);
+        if (at >= 0)
+        {
+            if (at < ids.Count - 1)
+                ids.RemoveRange(at + 1, ids.Count - at - 1);
+            return;
+        }
+
+        if (ids.Count > 0 && ids[^1] == oceanId)
+            ids.Add(shoreId);
+    }
+
+    private static bool TrySail(
+        RouteHex start,
+        string oceanId,
+        Dictionary<string, RouteHex> byId,
+        Dictionary<(int Q, int R), RouteHex> byCoord,
+        IReadOnlyDictionary<string, WindAt>? wind,
+        HashSet<SailNode>? reach,
+        out List<string> ids)
+    {
+        reach ??= Reach(oceanId, byId, byCoord, wind);
+        if (!reach.Contains(new SailNode(oceanId, 0)))
+        {
+            ids = [];
+            return false;
+        }
+        return TryBoard(start, oceanId, reach, byId, byCoord, wind, out ids);
+    }
+
+    private static RoutePlan FinishBoat(
+        RouteHex start,
+        string destinationId,
+        string endId,
+        List<string> ids,
+        Dictionary<string, RouteHex> byId,
+        Dictionary<(int Q, int R), RouteHex> byCoord,
+        IReadOnlyDictionary<string, WindAt>? wind,
+        Func<string, string>? nameOf,
+        bool endsAtDestination)
+    {
+        var endName = nameOf?.Invoke(endId) ?? endId;
+        var walked = ids.Count > 0 && ids[0] == start.Id && !IsWater(start) && ids.Exists(id => id != start.Id);
+        var status = endsAtDestination
+            ? walked ? "Walk to the water, then sail." : "Boat route."
+            : walked
+                ? $"Walk to the water, then sail. The sail ends at {endName}. The rest is a walk you do yourself."
+                : $"The sail ends at {endName}. The rest is a walk you do yourself.";
+        return Finish(TravelMode.Boat, destinationId, endId, ids, byId, byCoord, wind, status, walkRemainder: !endsAtDestination);
     }
 
     private static bool TryBoard(

@@ -105,4 +105,16 @@ public readonly record struct HexLayout(double Size)
         var (cx, cy) = Center(q, r);
         return (cx + Size * Math.Cos(angle), cy + Size * Math.Sin(angle));
     }
+
+    /// <summary>World half-extent covered by a minimap picture. Play bounds are ±1024.</summary>
+    public const double PicturePlayHalf = 1024;
+
+    /// <summary>World distance from a hex center to a flat side inside that picture.</summary>
+    public const double PictureSeam = 736;
+
+    /// <summary>
+    /// Side of the square a minimap is drawn into before the hex clips it.
+    /// The seam then sits on the edge shared with the next hex.
+    /// </summary>
+    public double PictureSide() => Size * Math.Sqrt(3) * (PicturePlayHalf / PictureSeam);
 }

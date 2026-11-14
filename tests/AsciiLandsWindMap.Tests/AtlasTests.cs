@@ -62,6 +62,10 @@ public class AtlasTests
         Assert.Null(AtlasLabel.PlaceName("Open Sea"));
         Assert.Null(AtlasLabel.PlaceName("?"));
         Assert.Null(AtlasLabel.PlaceName(". Visited."));
+        Assert.Equal("Open Sea", AtlasLabel.MapLabel("Open Sea"));
+        Assert.Equal("Moss Raven Sea", AtlasLabel.MapLabel("Moss Raven Sea. Visited. Double-click or press Enter to open local map."));
+        Assert.Null(AtlasLabel.MapLabel("?"));
+        Assert.Null(AtlasLabel.MapLabel("Loading world graph..."));
     }
 
     [Fact]

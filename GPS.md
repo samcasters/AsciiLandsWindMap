@@ -44,7 +44,7 @@ The route may only sail on ocean hexes, including ocean reached through a river 
 
 - On the water: sail from the current hex to the destination.
 - On land: walk to the nearest chart water that connects through to the ocean, then sail. Boarding happens where blue meets the sea. The walk uses the walk rules below.
-- Destination on land: the sail ends at the ocean hex nearest that land hex. The status line says the rest is a walk you do yourself. The route does not draw that leftover walk.
+- Destination on land: the sail ends on the closest shoreline of that land. A shoreline is a land hex that shares a side with the ocean, and the closest one is the shortest walk from the destination that never crosses ocean. The line sails to the ocean beside that shore and steps one hex onto the beach. It does not sail on up the river. When that shore is the destination, the route ends there. When the beach is still short of the destination, the status line says the rest is a walk you do yourself, and the route does not draw that leftover walk. If no shoreline on that land can be reached, the sail ends at the nearest ocean hex and the status says the same.
 
 Wind is traffic, and only on ocean sides. Each ocean crossing has a base time. A wind going the way you sail shortens that time. A wind against you lengthens it. A stronger arrow changes the time more. The route is the path with the smallest total time, not the fewest hexes. Land and river approaches ignore the wind.
 
@@ -54,7 +54,7 @@ Walk uses land hexes and river hexes. Ocean hexes are closed. Wind is ignored. T
 
 ### Already traveled
 
-Sync already knows the hex you are in. When you enter the next hex of the route, every hex behind you is marked passed. Those hexes stay on the line, dimmer, and they are not part of the trip you still have to make. If you leave the line, the route is calculated again from the hex you are in to the same destination. That is the same split a street GPS draws between the driven part and the part still ahead.
+Sync already knows the hex you are in. While a route is on, that hex is read about once a second from the zone name on the game screen, so the line moves when you enter the next tile. When you enter the next hex of the route, every hex behind you is marked passed. Those hexes stay on the line, dimmer, and they are not part of the trip you still have to make. If you leave the line, the route is calculated again from the hex you are in to the same destination. That is the same split a street GPS draws between the driven part and the part still ahead.
 
 ### The line
 
@@ -66,7 +66,7 @@ This runs only while a GPS route is active. When the play tab can be scripted, t
 
 On that minimap only:
 
-- Top left: the wind direction on your hex, in the same words the app already uses.
+- Top left: an arrow for the wind on your hex. It points where the wind is going, the same way the map arrows do. A longer arrow is a stronger wind. A small ring means calm.
 - Top right: the text `GPS`.
 - The same two clock hands for the hex you are in, with arrowheads. The hand on the side you already came from is darkened. The hand toward the next hex stays bright.
 
